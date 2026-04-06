@@ -209,8 +209,8 @@ snapshot_download(
 │           ├── merged.Q4_K_M.gguf  # For inference with llama.cpp
 │           └── merged.BF16-mmproj.gguf
 ├── train_unsloth.py                # Basic training script
-├── train_con_val_loss.py           # Script with Train/Val loss + charts
-├── evaluar_modelo.py               # Post-training evaluation script
+├── train_with_val_loss.py          # Script with Train/Val loss + charts
+├── model_evaluation.py             # Post-training evaluation script
 └── finetuning_config.yaml          # Config for LLaMA Factory (reference)
 ```
 
