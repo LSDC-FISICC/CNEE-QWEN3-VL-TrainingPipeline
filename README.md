@@ -275,23 +275,86 @@ model.save_pretrained_gguf(
 "
 ```
 
-### Inference with llama.cpp
+### Inference with llama.cpp (Unsloth)
+
+Unsloth ships its own `llama-mtmd-cli` binary that supports multimodal models with a separate `mmproj` file. This is the recommended inference path for GGUF models.
 
 ```bash
-# Find the binary
+# Locate the binary (installed by Unsloth)
 find ~/.unsloth -name "llama-mtmd-cli" 2>/dev/null
+```
 
-# Run inference
+**Key flags:**
+
+| Flag | Description |
+|---|---|
+| `-m` | Path to the quantized GGUF model |
+| `--mmproj` | Path to the multimodal projector (vision encoder) |
+| `--image` | Image file to send (repeat for multiple pages) |
+| `-p` | Prompt text |
+| `-n` | Max tokens to generate |
+| `--gpu-layers` | Number of layers to offload to GPU (29 for RTX 3070 Ti) |
+| `-c` | Context window size |
+
+#### Single image — full normative analysis
+
+```bash
 ~/.unsloth/llama.cpp/llama-mtmd-cli \
-    -m output/qwen3vl_2b_cnee/merged_gguf/merged.Q4_K_M.gguf \
-    --mmproj output/qwen3vl_2b_cnee/merged_gguf/merged.BF16-mmproj.gguf \
-    --image dataset/DEOCSA_2023S1/approved/caso_022/page_001.jpg \
-    --image dataset/DEOCSA_2023S1/approved/caso_022/page_002.jpg \
-    -p "Analyze this case file and determine whether it is APPROVED or REJECTED according to the 7 regulatory criteria." \
+    -m ~/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.Q4_K_M.gguf \
+    --mmproj ~/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.BF16-mmproj.gguf \
+    --image ~/CNEE/dataset/DEOCSA_2023S1/approved/caso_022/page_001.jpg \
+    -p "Analiza este expediente y determina si es APROBADO o RECHAZADO segun los 7 criterios normativos." \
     -n 500 \
+    --gpu-layers 29 \
+    -c 1024
+```
+
+#### Two images — concise decision + justification
+
+```bash
+~/.unsloth/llama.cpp/llama-mtmd-cli \
+    -m ~/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.Q4_K_M.gguf \
+    --mmproj ~/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.BF16-mmproj.gguf \
+    --image ~/CNEE/dataset/DEOCSA_2023S1/approved/caso_022/page_001.jpg \
+    --image ~/CNEE/dataset/DEOCSA_2023S1/approved/caso_022/page_002.jpg \
+    -p "Analiza estas paginas del expediente de fuerza mayor. Responde unicamente con: 1) APROBADO o RECHAZADO, 2) El criterio oficial que justifica la decision." \
+    -n 300 \
     --gpu-layers 29 \
     -c 2048
 ```
+
+#### Three images — approved case (caso_029)
+
+```bash
+~/.unsloth/llama.cpp/llama-mtmd-cli \
+    -m ~/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.Q4_K_M.gguf \
+    --mmproj ~/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.BF16-mmproj.gguf \
+    --image ~/CNEE/dataset/DEOCSA_2023S1/approved/caso_029/page_001.jpg \
+    --image ~/CNEE/dataset/DEOCSA_2023S1/approved/caso_029/page_002.jpg \
+    --image ~/CNEE/dataset/DEOCSA_2023S1/approved/caso_029/page_003.jpg \
+    -p "Analiza estas paginas del expediente de fuerza mayor. Responde unicamente con: 1) APROBADO o RECHAZADO, 2) El criterio oficial que justifica la decision." \
+    -n 300 \
+    --gpu-layers 29 \
+    -c 2048
+```
+
+#### Four images — rejected case (caso_240)
+
+```bash
+~/.unsloth/llama.cpp/llama-mtmd-cli \
+    -m ~/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.Q4_K_M.gguf \
+    --mmproj ~/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.BF16-mmproj.gguf \
+    --image ~/CNEE/dataset/DEOCSA_2023S1/rejected/caso_240/page_003.jpg \
+    --image ~/CNEE/dataset/DEOCSA_2023S1/rejected/caso_240/page_004.jpg \
+    --image ~/CNEE/dataset/DEOCSA_2023S1/rejected/caso_240/page_005.jpg \
+    --image ~/CNEE/dataset/DEOCSA_2023S1/rejected/caso_240/page_006.jpg \
+    -p "Analiza estas paginas del expediente de fuerza mayor. Responde unicamente con: 1) APROBADO o RECHAZADO, 2) El criterio oficial que justifica la decision." \
+    -n 300 \
+    --gpu-layers 29 \
+    -c 2048
+```
+
+> **Note:** Each additional image increases VRAM and context usage. For 4+ images use `-c 2048` or higher. Adjust `--gpu-layers` down if you get out-of-memory errors.
 
 ---
 
