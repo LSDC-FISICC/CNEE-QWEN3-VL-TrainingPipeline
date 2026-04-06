@@ -1,0 +1,174 @@
+## para verificar que si carga
+
+cd ~/CNEE
+source .venv/bin/activate
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 << 'EOF'
+from unsloth import FastVisionModel
+import torch
+
+print("Cargando Qwen3-VL 2B...")
+
+model, tokenizer = FastVisionModel.from_pretrained(
+    model_name="/home/julioefajardo/CNEE/models/Qwen3-VL-2B-Instruct",
+    load_in_4bit=True,
+    use_gradient_checkpointing="unsloth",
+)
+
+print("Modelo cargado exitosamente")
+print(f"VRAM usada: {round(torch.cuda.memory_allocated()/1e9, 2)} GB")
+print(f"VRAM libre: {round(torch.cuda.mem_get_info()[0]/1e9, 2)} GB")
+EOF
+
+
+## para entrenar
+
+cd ~/CNEE/LLaMA-Factory
+
+DISABLE_VERSION_CHECK=1 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+~/CNEE/.venv/bin/llamafactory-cli train \
+    /home/julioefajardo/CNEE/finetuning_config.yaml
+    
+
+## como no se pudo con Llama Factory, directamente con Unsloth
+
+mkdir -p /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee
+
+cd ~/CNEE
+source .venv/bin/activate
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python3 /home/julioefajardo/CNEE/train_unsloth.py
+
+## Entreno con metricas
+
+cd ~/CNEE
+source .venv/bin/activate
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python3 ~/CNEE/train_unsloth_v2.py
+
+## train val loss
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python3 ~/CNEE/train_con_val_loss.py
+
+## solo metricas
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 ~/CNEE/evaluar_modelo.py
+
+
+## fusionar pesos LoRA con el modelo
+
+cd ~/CNEE
+source .venv/bin/activate
+
+python3 << 'EOF'
+from unsloth import FastVisionModel
+
+print("Cargando modelo entrenado...")
+model, tokenizer = FastVisionModel.from_pretrained(
+    model_name="/home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/final",
+    load_in_4bit=True,
+)
+
+print("Fusionando pesos LoRA con modelo base...")
+model.save_pretrained_merged(
+    "/home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged",
+    tokenizer,
+    save_method="merged_16bit",
+)
+print("Modelo fusionado guardado en: output/qwen3vl_2b_cnee/merged")
+EOF
+
+## Convertir a formato GGUF para Ollama
+
+cd ~/CNEE
+source .venv/bin/activate
+
+python3 << 'EOF'
+from unsloth import FastVisionModel
+
+model, tokenizer = FastVisionModel.from_pretrained(
+    model_name="/home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged",
+    load_in_4bit=False,
+)
+
+print("Convirtiendo a GGUF Q4_K_M...")
+model.save_pretrained_gguf(
+    "/home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/gguf",
+    tokenizer,
+    quantization_method="q4_k_m",
+)
+print("Conversion completa")
+EOF
+
+## Crear modelfile para ollama
+
+cat > /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/Modelfile << 'EOF'
+FROM /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.Q4_K_M.gguf
+
+SYSTEM """Eres un evaluador tecnico experto en analisis de expedientes de interrupcion electrica. Evaluas documentos segun 7 criterios normativos y produces una decision estructurada en JSON."""
+
+PARAMETER temperature 0.1
+PARAMETER top_p 0.9
+PARAMETER num_ctx 8192
+EOF
+
+echo "Modelfile creado"
+cat ~/CNEE/output/qwen3vl_2b_cnee/Modelfile
+
+# registrar el modelo en ollama
+
+ollama create cneefm2b -f /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/Modelfile
+
+# Verificar que aparece
+ollama list
+
+
+### probar modelo
+
+~/.unsloth/llama.cpp/llama-mtmd-cli \
+    -m /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.Q4_K_M.gguf \
+    --mmproj /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.BF16-mmproj.gguf \
+    --image /home/julioefajardo/CNEE/dataset/DEOCSA_2023S1/approved/caso_022/page_001.jpg \
+    -p "Analiza este expediente y determina si es APROBADO o RECHAZADO segun los 7 criterios normativos." \
+    -n 500 \
+    --gpu-layers 29 \
+    -c 1024
+
+
+~/.unsloth/llama.cpp/llama-mtmd-cli \
+    -m /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.Q4_K_M.gguf \
+    --mmproj /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.BF16-mmproj.gguf \
+    --image /home/julioefajardo/CNEE/dataset/DEOCSA_2023S1/approved/caso_022/page_001.jpg \
+    --image /home/julioefajardo/CNEE/dataset/DEOCSA_2023S1/approved/caso_022/page_002.jpg \
+    -p "Analiza estas paginas del expediente de fuerza mayor. Responde unicamente con: 1) APROBADO o RECHAZADO, 2) El criterio oficial que justifica la decision." \
+    -n 300 \
+    --gpu-layers 29 \
+    -c 2048
+
+~/.unsloth/llama.cpp/llama-mtmd-cli \
+    -m /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.Q4_K_M.gguf \
+    --mmproj /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.BF16-mmproj.gguf \
+    --image /home/julioefajardo/CNEE/dataset/DEOCSA_2023S1/approved/caso_029/page_001.jpg \
+    --image /home/julioefajardo/CNEE/dataset/DEOCSA_2023S1/approved/caso_029/page_002.jpg \
+    --image /home/julioefajardo/CNEE/dataset/DEOCSA_2023S1/approved/caso_029/page_003.jpg \
+    -p "Analiza estas paginas del expediente de fuerza mayor. Responde unicamente con: 1) APROBADO o RECHAZADO, 2) El criterio oficial que justifica la decision." \
+    -n 300 \
+    --gpu-layers 29 \
+    -c 2048
+ 
+ ~/.unsloth/llama.cpp/llama-mtmd-cli \
+    -m /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.Q4_K_M.gguf \
+    --mmproj /home/julioefajardo/CNEE/output/qwen3vl_2b_cnee/merged_gguf/merged.BF16-mmproj.gguf \
+    --image /home/julioefajardo/CNEE/dataset/DEOCSA_2023S1/rejected/caso_240/page_003.jpg \
+    --image /home/julioefajardo/CNEE/dataset/DEOCSA_2023S1/rejected/caso_240/page_004.jpg \
+    --image /home/julioefajardo/CNEE/dataset/DEOCSA_2023S1/rejected/caso_240/page_005.jpg \
+    --image /home/julioefajardo/CNEE/dataset/DEOCSA_2023S1/rejected/caso_240/page_006.jpg \
+    -p "Analiza estas paginas del expediente de fuerza mayor. Responde unicamente con: 1) APROBADO o RECHAZADO, 2) El criterio oficial que justifica la decision." \
+    -n 300 \
+    --gpu-layers 29 \
+    -c 2048
+ 

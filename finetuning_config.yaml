@@ -1,0 +1,56 @@
+### Modelo base
+model_name_or_path: /home/julioefajardo/CNEE/models/Qwen3-VL-2B-Instruct
+
+### Metodo de entrenamiento
+stage: sft
+do_train: true
+finetuning_type: lora
+
+### Configuracion LoRA — rank reducido para ahorrar memoria
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target: q_proj,v_proj
+
+### Dataset
+dataset: cnee_fuerza_mayor
+dataset_dir: /home/julioefajardo/CNEE/dataset
+template: qwen3_vl
+cutoff_len: 1024
+max_samples: 99
+overwrite_cache: true
+preprocessing_num_workers: 1
+
+### Imagenes — reducido agresivamente
+image_max_pixels: 200704
+
+### Entrenamiento
+output_dir: /home/julioefajardo/CNEE/output/qwen3vl_cnee
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+gradient_checkpointing: true
+learning_rate: 1.0e-4
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_steps: 10
+bf16: true
+ddp_timeout: 180000000
+
+### Cuantizacion QLoRA
+quantization_bit: 4
+quantization_method: bitsandbytes
+
+### Guardado
+save_strategy: steps
+save_steps: 50
+save_total_limit: 2
+logging_steps: 10
+
+### Evaluacion
+val_size: 0.1
+eval_strategy: steps
+eval_steps: 50
+load_best_model_at_end: true
+
+### Reporte
+report_to: none

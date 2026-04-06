@@ -1,0 +1,38 @@
+# ── Model weights & checkpoints ──────────────────────────────────────────────
+models/
+first_good_model_backup/
+output/
+unsloth_compiled_cache/
+
+# Large binary model file extensions (catch-all)
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.h5
+
+# ── Dataset raw files ─────────────────────────────────────────────────────────
+dataset/DEOCSA_2023S1/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
