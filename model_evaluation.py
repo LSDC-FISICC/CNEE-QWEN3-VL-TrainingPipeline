@@ -125,7 +125,7 @@ def inferir_caso(caso):
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=1024, #cambiar a 512 cuando sea quiera que sea más rapido, pero menos preciso, más precios a 4096
+            max_new_tokens=512, #cambiar a 512 cuando sea quiera que sea más rapido, pero menos preciso. Más preciso y lento a 4096
             temperature=0.1,
             do_sample=False,
         )
