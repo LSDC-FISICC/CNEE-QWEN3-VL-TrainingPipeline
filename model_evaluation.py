@@ -7,6 +7,7 @@ import json
 import re
 import os
 import random
+import time
 import torch
 import matplotlib
 matplotlib.use("Agg")
@@ -139,8 +140,12 @@ def inferir_caso(caso):
 exact_matches = 0
 vqa_correct   = 0
 resultados    = []
+tiempos_casos = []
+
+total_inicio = time.time()
 
 for i, caso in enumerate(eval_casos):
+    caso_inicio = time.time()
     print(f"  Caso {i+1}/{len(eval_casos)}: {caso['id']}...")
 
     ground_truth = ""
@@ -150,6 +155,7 @@ for i, caso in enumerate(eval_casos):
 
     label_real = caso["metadata"]["label"]
     prediccion = inferir_caso(caso)
+    tiempo_caso = time.time() - caso_inicio
     label_pred = extraer_decision(prediccion)
 
     exact  = ground_truth.strip() == prediccion.strip()
@@ -160,7 +166,8 @@ for i, caso in enumerate(eval_casos):
     if vqa_ok:
         vqa_correct += 1
 
-    print(f"    Real: {label_real} | Pred: {label_pred} | VQA: {'OK' if vqa_ok else 'FAIL'}")
+    print(f"    Real: {label_real} | Pred: {label_pred} | VQA: {'OK' if vqa_ok else 'FAIL'} | Tiempo: {tiempo_caso:.2f}s")
+    tiempos_casos.append(tiempo_caso)
 
     resultados.append({
         "caso":        caso["id"],
@@ -169,11 +176,14 @@ for i, caso in enumerate(eval_casos):
         "exact_match": exact,
         "vqa_ok":      vqa_ok,
         "prediccion":  prediccion,
+        "tiempo_s":    round(tiempo_caso, 2),
     })
 
+tiempo_total = time.time() - total_inicio
 n_val           = len(eval_casos)
 exact_match_pct = exact_matches / n_val * 100
 vqa_accuracy    = vqa_correct   / n_val * 100
+tiempo_promedio = tiempo_total / n_val if n_val > 0 else 0
 
 tp = sum(1 for r in resultados if r["label_real"]=="APROBADO"  and r["label_pred"]=="APROBADO")
 tn = sum(1 for r in resultados if r["label_real"]=="RECHAZADO" and r["label_pred"]=="RECHAZADO")
@@ -193,6 +203,12 @@ print(f"Precision:     {precision:.3f}")
 print(f"Recall:        {recall:.3f}")
 print(f"F1-Score:      {f1:.3f}")
 print(f"{'='*55}")
+print(f"\nTIEMPOS DE INFERENCIA:")
+print(f"  Tiempo total:    {tiempo_total:.2f}s")
+print(f"  Tiempo promedio: {tiempo_promedio:.2f}s/caso")
+print(f"  Caso más rápido: {min(tiempos_casos):.2f}s")
+print(f"  Caso más lento:  {max(tiempos_casos):.2f}s")
+print(f"{'='*55}")
 print(f"\nMatriz de confusion:")
 print(f"  TP (APROBADO correcto):  {tp}")
 print(f"  TN (RECHAZADO correcto): {tn}")
@@ -207,6 +223,12 @@ metricas_output = {
     "recall":         recall,
     "f1":             f1,
     "confusion_matrix": {"tp": tp, "tn": tn, "fp": fp, "fn": fn},
+    "tiempos": {
+        "tiempo_total_s": round(tiempo_total, 2),
+        "tiempo_promedio_s": round(tiempo_promedio, 2),
+        "tiempo_minimo_s": round(min(tiempos_casos), 2),
+        "tiempo_maximo_s": round(max(tiempos_casos), 2),
+    },
     "resultados":     resultados,
 }
 with open(f"{OUTPUT_DIR}/metricas_validacion.json", "w", encoding="utf-8") as f:
