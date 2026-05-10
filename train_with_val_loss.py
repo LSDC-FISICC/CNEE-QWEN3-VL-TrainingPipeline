@@ -252,7 +252,7 @@ mejora_train = float(tl_vals[0] - tl_vals[-1])       if tl_vals else 0.0
 mejora_val   = float(vl_vals[0] - vl_vals[-1])       if vl_vals else 0.0
 
 fig, axes = plt.subplots(1, 3, figsize=(20, 5))
-fig.suptitle(f"Entrenamiento Qwen3-VL 2B — {NUM_EPOCHS} Epochs (CNEE)",
+fig.suptitle(f"Entrenamiento Qwen3-VL 4B — {NUM_EPOCHS} Epochs (CNEE)",
              fontsize=13, fontweight="bold")
 
 # ── Plot 1: Train vs Val Loss por step ──

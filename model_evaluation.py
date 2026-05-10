@@ -25,7 +25,7 @@ print("=== Evaluacion del Modelo Qwen3-VL ===\n")
 # ══════════════════════════════════════════
 MAX_IMAGENES = 8
 OUTPUT_DIR   = "/home/ubuntu/cnee/output/qwen3vl_4b_v2"
-MODEL_PATH   = "/home/ubuntu/cnee/output/qwen3vl_4b_v2/final"  # Modelo fine-tuned con QLoRA
+MODEL_PATH   = "/home/ubuntu/cnee/output/qwen3vl_4b_v2/checkpoint-126"  # Modelo fine-tuned con QLoRA
 DATASET_PATH = "/home/ubuntu/cnee/CNEE-QWEN3-VL-TrainingPipeline/dataset/dataset_FINAL_rev_100casos.json"
 BASE         = "/home/ubuntu/cnee/CNEE-QWEN3-VL-TrainingPipeline"
 
@@ -125,7 +125,7 @@ def inferir_caso(caso):
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=4096,
+            max_new_tokens=1024, #cambiar a 512 cuando sea quiera que sea más rapido, pero menos preciso, más precios a 4096
             temperature=0.1,
             do_sample=False,
         )
