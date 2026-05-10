@@ -32,7 +32,11 @@ model, tokenizer = FastVisionModel.from_pretrained(
     load_in_4bit=True,
     use_gradient_checkpointing="unsloth",
 )
-tokenizer.model_max_length = 8192
+MODEL_MAX_SEQ_LENGTH = getattr(model, "max_seq_length", 2048)
+try:
+    tokenizer.model_max_length = MODEL_MAX_SEQ_LENGTH
+except Exception:
+    setattr(tokenizer, "model_max_length", MODEL_MAX_SEQ_LENGTH)
 
 model = FastVisionModel.get_peft_model(
     model,
@@ -137,6 +141,12 @@ class MetricsCallback(TrainerCallback):
 
 metrics_callback = MetricsCallback()
 
+class NoTruncUnslothVisionDataCollator(UnslothVisionDataCollator):
+    def __init__(self, model, processor, *args, **kwargs):
+        super().__init__(model, processor, *args, **kwargs)
+        self.max_seq_length = None
+        self.truncation = False
+
 # ══════════════════════════════════════════
 # 4. Entrenamiento
 # ══════════════════════════════════════════
@@ -145,7 +155,7 @@ FastVisionModel.for_training(model)
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
-    data_collator=UnslothVisionDataCollator(model, tokenizer),
+    data_collator=NoTruncUnslothVisionDataCollator(model, tokenizer),
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
     callbacks=[metrics_callback],
@@ -167,7 +177,7 @@ trainer = SFTTrainer(
         remove_unused_columns=False,
         dataset_text_field="text",
         dataset_kwargs={"skip_prepare_dataset": True},
-        max_seq_length=8192,
+        max_seq_length=MODEL_MAX_SEQ_LENGTH,
     ),
 )
 
@@ -226,8 +236,7 @@ def inferir_caso(caso_raw):
         text=text_input,
         images=images,
         return_tensors="pt",
-        truncation=True,
-        max_length=4096,
+        truncation=False,
     ).to("cuda")
 
     with torch.no_grad():

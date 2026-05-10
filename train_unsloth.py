@@ -7,7 +7,7 @@ from datasets import Dataset
 
 print("=== Iniciando entrenamiento con Unsloth ===")
 
-MAX_IMAGENES = 10  # Limitamos a 5 paginas por caso para caber en 8GB VRAM
+MAX_IMAGENES = 6  # Limitar imágenes para ajustarse mejor al presupuesto de tokens
 
 # ── 1. Cargar modelo ──
 model, tokenizer = FastVisionModel.from_pretrained(
@@ -15,7 +15,11 @@ model, tokenizer = FastVisionModel.from_pretrained(
     load_in_4bit=True,
     use_gradient_checkpointing="unsloth",
 )
-tokenizer.model_max_length = 8192
+MODEL_MAX_SEQ_LENGTH = getattr(model, "max_seq_length", 2048)
+try:
+    tokenizer.model_max_length = MODEL_MAX_SEQ_LENGTH
+except Exception:
+    setattr(tokenizer, "model_max_length", MODEL_MAX_SEQ_LENGTH)
 
 model = FastVisionModel.get_peft_model(
     model,
@@ -75,13 +79,19 @@ train_dataset = split["train"]
 eval_dataset  = split["test"]
 print(f"Train: {len(train_dataset)} | Eval: {len(eval_dataset)}")
 
+class NoTruncUnslothVisionDataCollator(UnslothVisionDataCollator):
+    def __init__(self, model, processor, *args, **kwargs):
+        super().__init__(model, processor, *args, **kwargs)
+        self.max_seq_length = None
+        self.truncation = False
+
 # ── 3. Entrenamiento ──
 FastVisionModel.for_training(model)
 
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
-    data_collator=UnslothVisionDataCollator(model, tokenizer),
+    data_collator=NoTruncUnslothVisionDataCollator(model, tokenizer),
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
     args=SFTConfig(
@@ -102,7 +112,7 @@ trainer = SFTTrainer(
         remove_unused_columns=False,
         dataset_text_field="text",
         dataset_kwargs={"skip_prepare_dataset": True},
-        max_seq_length=8192,
+        max_seq_length=MODEL_MAX_SEQ_LENGTH,
     ),
 )
 

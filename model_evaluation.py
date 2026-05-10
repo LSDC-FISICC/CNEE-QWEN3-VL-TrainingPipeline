@@ -1,3 +1,8 @@
+"""
+Script de evaluacion del modelo Qwen3-VL fine-tuned
+Ejecuta la evaluacion en el set de validacion
+"""
+
 import json
 import re
 import os
@@ -6,44 +11,53 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from collections import defaultdict
 from unsloth import FastVisionModel
-from datasets import Dataset
 from PIL import Image
 
 torch._dynamo.config.disable = True
+os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
-print("=== Evaluacion del modelo fine-tuned ===")
-
-MAX_IMAGENES = 5
-OUTPUT_DIR   = "/home/julioefajardo/CNEE/output/qwen3vl_2b_cnee"
-MODEL_PATH   = f"{OUTPUT_DIR}/final"
-DATASET_PATH = "/home/julioefajardo/CNEE/dataset/dataset_FINAL_100casos.json"
-BASE         = "/home/julioefajardo/CNEE"
+print("=== Evaluacion del Modelo Qwen3-VL ===\n")
 
 # ══════════════════════════════════════════
-# 1. Cargar modelo entrenado
+# Configuracion
 # ══════════════════════════════════════════
-print("Cargando modelo entrenado...")
+MAX_IMAGENES = 8
+OUTPUT_DIR   = "/home/ubuntu/cnee/output/qwen3vl_4b_v2"
+MODEL_PATH   = "/home/ubuntu/cnee/output/qwen3vl_4b_v2/final"  # Modelo fine-tuned con QLoRA
+DATASET_PATH = "/home/ubuntu/cnee/CNEE-QWEN3-VL-TrainingPipeline/dataset/dataset_FINAL_rev_100casos.json"
+BASE         = "/home/ubuntu/cnee/CNEE-QWEN3-VL-TrainingPipeline"
+
+
+# ══════════════════════════════════════════
+# 1. Cargar modelo
+# ══════════════════════════════════════════
+print("Cargando modelo...")
 model, tokenizer = FastVisionModel.from_pretrained(
     model_name=MODEL_PATH,
     load_in_4bit=True,
+    use_gradient_checkpointing="unsloth",
 )
-tokenizer.model_max_length = 8192
-FastVisionModel.for_inference(model)
+MODEL_MAX_SEQ_LENGTH = getattr(model, "max_seq_length", 4096)
+try:
+    tokenizer.model_max_length = MODEL_MAX_SEQ_LENGTH
+except Exception:
+    setattr(tokenizer, "model_max_length", MODEL_MAX_SEQ_LENGTH)
+
 print(f"Modelo cargado. VRAM: {round(torch.cuda.memory_allocated()/1e9, 2)} GB")
 
 # ══════════════════════════════════════════
-# 2. Cargar dataset y hacer split 90/10
+# 2. Cargar dataset y crear split
 # ══════════════════════════════════════════
+print("Cargando dataset...")
 with open(DATASET_PATH) as f:
     data = json.load(f)
 
 casos = data["casos"]
 
-# Split estratificado 90/10 — misma semilla que el entrenamiento
-from collections import defaultdict
+# Split estratificado 90/10 — misma semilla siempre
 random.seed(42)
-
 grupos = defaultdict(list)
 for i, caso in enumerate(casos):
     grupos[caso["metadata"]["label"]].append(i)
@@ -53,15 +67,21 @@ for label, indices in grupos.items():
     n_val = max(1, int(len(indices) * 0.1))
     val_indices.extend(random.sample(indices, n_val))
 
+
+val_indices = []
+for label, indices in grupos.items():
+    n_val = max(1, int(len(indices) * 0.1))
+    val_indices.extend(random.sample(indices, n_val))
+
+# ══════════════════════════════════════════
+# 3. Evaluacion del modelo en validacion
+# ══════════════════════════════════════════
+print("\n=== Evaluacion del modelo en set de validacion ===")
+
+FastVisionModel.for_inference(model)
+
 eval_casos = [casos[i] for i in val_indices]
 
-print(f"Casos de validacion: {len(eval_casos)}")
-print(f"  APROBADOS:  {sum(1 for c in eval_casos if c['metadata']['label']=='APROBADO')}")
-print(f"  RECHAZADOS: {sum(1 for c in eval_casos if c['metadata']['label']=='RECHAZADO')}")
-
-# ══════════════════════════════════════════
-# 3. Funciones auxiliares
-# ══════════════════════════════════════════
 def extraer_decision(texto):
     match = re.search(r'"decision"\s*:\s*"(APROBADO|RECHAZADO)"', texto)
     if match:
@@ -99,14 +119,13 @@ def inferir_caso(caso):
         text=text_input,
         images=images,
         return_tensors="pt",
-        truncation=True,
-        max_length=4096,
+        truncation=False,
     ).to("cuda")
 
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=512,
+            max_new_tokens=4096,
             temperature=0.1,
             do_sample=False,
         )
@@ -117,10 +136,6 @@ def inferir_caso(caso):
     )
     return generated
 
-# ══════════════════════════════════════════
-# 4. Evaluar cada caso
-# ══════════════════════════════════════════
-print("\nEvaluando casos...")
 exact_matches = 0
 vqa_correct   = 0
 resultados    = []
@@ -128,20 +143,16 @@ resultados    = []
 for i, caso in enumerate(eval_casos):
     print(f"  Caso {i+1}/{len(eval_casos)}: {caso['id']}...")
 
-    # Ground truth
     ground_truth = ""
     for item in caso["messages"][1]["content"]:
         if item.get("type") == "text" and item.get("text"):
             ground_truth = item["text"]
 
     label_real = caso["metadata"]["label"]
-
-    # Inferencia
     prediccion = inferir_caso(caso)
     label_pred = extraer_decision(prediccion)
 
-    # Metricas
-    exact = ground_truth.strip() == prediccion.strip()
+    exact  = ground_truth.strip() == prediccion.strip()
     vqa_ok = label_pred == label_real
 
     if exact:
@@ -157,17 +168,13 @@ for i, caso in enumerate(eval_casos):
         "label_pred":  label_pred,
         "exact_match": exact,
         "vqa_ok":      vqa_ok,
-        "prediccion":  prediccion[:300],  # Primeros 300 chars
+        "prediccion":  prediccion,
     })
 
-# ══════════════════════════════════════════
-# 5. Resumen de metricas
-# ══════════════════════════════════════════
 n_val           = len(eval_casos)
 exact_match_pct = exact_matches / n_val * 100
 vqa_accuracy    = vqa_correct   / n_val * 100
 
-# Matriz de confusion
 tp = sum(1 for r in resultados if r["label_real"]=="APROBADO"  and r["label_pred"]=="APROBADO")
 tn = sum(1 for r in resultados if r["label_real"]=="RECHAZADO" and r["label_pred"]=="RECHAZADO")
 fp = sum(1 for r in resultados if r["label_real"]=="RECHAZADO" and r["label_pred"]=="APROBADO")
@@ -192,16 +199,6 @@ print(f"  TN (RECHAZADO correcto): {tn}")
 print(f"  FP (falso APROBADO):     {fp}")
 print(f"  FN (falso RECHAZADO):    {fn}")
 
-print(f"\nDetalle por caso:")
-print(f"{'Caso':<35} {'Real':<12} {'Pred':<12} {'VQA':>5} {'Exact':>7}")
-print("-" * 75)
-for r in resultados:
-    print(f"{r['caso']:<35} {r['label_real']:<12} {r['label_pred']:<12} "
-          f"{'OK' if r['vqa_ok'] else 'FAIL':>5} {'OK' if r['exact_match'] else 'FAIL':>7}")
-
-# ══════════════════════════════════════════
-# 6. Guardar resultados
-# ══════════════════════════════════════════
 metricas_output = {
     "n_val":          n_val,
     "vqa_accuracy":   vqa_accuracy,
@@ -217,10 +214,10 @@ with open(f"{OUTPUT_DIR}/metricas_validacion.json", "w", encoding="utf-8") as f:
 print(f"\nMetricas guardadas en: {OUTPUT_DIR}/metricas_validacion.json")
 
 # ══════════════════════════════════════════
-# 7. Grafica
+# 4. Grafica de evaluacion
 # ══════════════════════════════════════════
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-fig.suptitle("Evaluacion del Modelo Fine-tuned — Qwen3-VL 2B (CNEE)", 
+fig.suptitle("Evaluacion del Modelo Fine-tuned — Qwen3-VL 4B (CNEE)",
              fontsize=13, fontweight="bold")
 
 # Plot 1: Metricas principales
@@ -256,11 +253,9 @@ for i in range(2):
                     color="white" if confusion[i][j] > n_val/4 else "black")
 
 # Plot 3: Distribucion de predicciones
-labels_reales = [r["label_real"] for r in resultados]
-labels_preds  = [r["label_pred"] for r in resultados]
-categorias    = ["APROBADO\nCorrecto", "RECHAZADO\nCorrecto", "APROBADO\nIncorrecto", "RECHAZADO\nIncorrecto"]
-valores       = [tp, tn, fp, fn]
-colores       = ["#16A34A", "#0D1B3E", "#EF4444", "#F59E0B"]
+categorias = ["APROBADO\nCorrecto", "RECHAZADO\nCorrecto", "APROBADO\nIncorrecto", "RECHAZADO\nIncorrecto"]
+valores    = [tp, tn, fp, fn]
+colores    = ["#16A34A", "#0D1B3E", "#EF4444", "#F59E0B"]
 bars2 = axes[2].bar(categorias, valores, color=colores, width=0.6)
 axes[2].set_title("Distribucion de Predicciones")
 axes[2].set_ylabel("Cantidad de casos")
@@ -274,8 +269,9 @@ for bar, val in zip(bars2, valores):
     )
 
 plt.tight_layout()
-plot_path = f"{OUTPUT_DIR}/evaluacion_modelo.png"
-plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+eval_plot_path = f"{OUTPUT_DIR}/evaluacion_modelo.png"
+plt.savefig(eval_plot_path, dpi=150, bbox_inches="tight")
 plt.close()
-print(f"Grafica guardada en: {plot_path}")
+print(f"Grafica guardada en: {eval_plot_path}")
+
 print("\n=== Evaluacion completada ===")

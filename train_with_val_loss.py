@@ -13,17 +13,18 @@ from trl import SFTTrainer, SFTConfig
 from datasets import Dataset
 from transformers import TrainerCallback
 from PIL import Image
+import pyarrow as pa
 
 torch._dynamo.config.disable = True
 os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
 print("=== Entrenamiento con Train y Val Loss ===")
 
-MAX_IMAGENES = 3
-OUTPUT_DIR   = "/home/julioefajardo/CNEE/output/qwen3vl_2b_v2"
-MODEL_PATH   = "/home/julioefajardo/CNEE/models/Qwen3-VL-2B-Instruct"
-DATASET_PATH = "/home/julioefajardo/CNEE/dataset/dataset_FINAL_rev_100casos.json"
-BASE         = "/home/julioefajardo/CNEE"
+MAX_IMAGENES = 8
+OUTPUT_DIR   = "/home/ubuntu/cnee/output/qwen3vl_4b_v2"
+MODEL_PATH   = "/home/ubuntu/cnee/models/Qwen3-VL-4B-Instruct"
+DATASET_PATH = "/home/ubuntu/cnee/CNEE-QWEN3-VL-TrainingPipeline/dataset/dataset_FINAL_rev_100casos.json"
+BASE         = "/home/ubuntu/cnee/CNEE-QWEN3-VL-TrainingPipeline"
 NUM_EPOCHS   = 25 # <-- Cambiar aqui
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -36,7 +37,11 @@ model, tokenizer = FastVisionModel.from_pretrained(
     load_in_4bit=True,
     use_gradient_checkpointing="unsloth",
 )
-tokenizer.model_max_length = 8192
+MODEL_MAX_SEQ_LENGTH = getattr(model, "max_seq_length", 4096)
+try:
+    tokenizer.model_max_length = MODEL_MAX_SEQ_LENGTH
+except Exception:
+    setattr(tokenizer, "model_max_length", MODEL_MAX_SEQ_LENGTH)
 
 model = FastVisionModel.get_peft_model(
     model,
@@ -102,8 +107,13 @@ def construir_ejemplo(caso):
         ]
     }
 
-train_dataset = Dataset.from_list([construir_ejemplo(casos[i]) for i in train_indices])
-eval_dataset  = Dataset.from_list([construir_ejemplo(casos[i]) for i in val_indices])
+
+def build_dataset(examples):
+    table = pa.Table.from_pylist(examples)
+    return Dataset(table, fingerprint="no_fp")
+
+train_dataset = build_dataset([construir_ejemplo(casos[i]) for i in train_indices])
+eval_dataset  = build_dataset([construir_ejemplo(casos[i]) for i in val_indices])
 
 print(f"Train: {len(train_dataset)} | Val: {len(eval_dataset)}")
 print(f"  Train APROBADOS:  {sum(1 for i in train_indices if casos[i]['metadata']['label']=='APROBADO')}")
@@ -139,6 +149,12 @@ class LossCallback(TrainerCallback):
 
 loss_callback = LossCallback()
 
+class NoTruncUnslothVisionDataCollator(UnslothVisionDataCollator):
+    def __init__(self, model, processor, *args, **kwargs):
+        super().__init__(model, processor, *args, **kwargs)
+        self.max_seq_length = None
+        self.truncation = False
+
 # ══════════════════════════════════════════
 # 4. Calcular eval_steps para evaluar
 #    aproximadamente una vez por epoch
@@ -158,7 +174,7 @@ FastVisionModel.for_training(model)
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
-    data_collator=UnslothVisionDataCollator(model, tokenizer),
+    data_collator=NoTruncUnslothVisionDataCollator(model, tokenizer),
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
     callbacks=[loss_callback],
@@ -183,7 +199,7 @@ trainer = SFTTrainer(
         remove_unused_columns=False,
         dataset_text_field="text",
         dataset_kwargs={"skip_prepare_dataset": True},
-        max_seq_length=8192,
+        max_seq_length=MODEL_MAX_SEQ_LENGTH,
     ),
 )
 
@@ -379,14 +395,13 @@ def inferir_caso(caso):
         text=text_input,
         images=images,
         return_tensors="pt",
-        truncation=True,
-        max_length=4096,
+        truncation=False,
     ).to("cuda")
 
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=512,
+            max_new_tokens=4096,
             temperature=0.1,
             do_sample=False,
         )
