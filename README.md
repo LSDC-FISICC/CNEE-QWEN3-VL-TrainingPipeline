@@ -6,14 +6,17 @@ Supervised training pipeline for Vision-Language Models (VLM) with QLoRA using U
 
 ## Supported Models
 
-| Model | Parameters | VRAM at 4-bit | RTX 3070 Ti (8 GB) | Cloud Server |
+| Model | Parameters | VRAM at 4-bit | RTX 3070 Ti (8 GB) | Cloud / DGX Spark |
 |---|---|---|---|---|
 | `Qwen/Qwen3-VL-2B-Instruct` | 2B | ~3–4 GB | ✅ Comfortable | ✅ |
 | `Qwen/Qwen3-VL-4B-Instruct` | 4B | ~5–6 GB | ⚠️ Very tight | ✅ |
+| `Qwen/Qwen3-VL-8B-Instruct` | 8B | ~10–12 GB | ❌ | ✅ DGX Spark only |
 | `Qwen/Qwen3.5-2B-Instruct` | 2B | ~3.5 GB | ✅ Comfortable | ✅ |
 | `Qwen/Qwen3.5-4B-Instruct` | 4B | ~5.5 GB | ✅ Viable | ✅ |
 
 > **Note:** Qwen3.5 outperforms Qwen3-VL on document comprehension benchmarks (OCR, long documents). Recommended as the base model for new experiments.
+>
+> **DGX Spark:** With 130.7 GB of unified memory, the 8B model can be trained with full LoRA (BF16, no quantization required) and with complete case files — no page truncation needed.
 
 ---
 
@@ -32,18 +35,33 @@ Supervised training pipeline for Vision-Language Models (VLM) with QLoRA using U
 - **CUDA Toolkit:** 12.8 (compatible with PyTorch 2.11+)
 - **Python:** 3.11
 
+### NVIDIA DGX Spark
+
+| Component | Specification |
+|---|---|
+| Superchip | NVIDIA GB10 Grace Blackwell |
+| Unified Memory | 130.7 GB LPDDR5X |
+| AI Performance | 1 PFLOP FP4 · 1000 TOPS |
+| CPU | 20 ARM cores (Grace) |
+| Storage | 4 TB NVMe SSD |
+| OS | DGX OS (Ubuntu 24.04 LTS) |
+| CUDA | 13.0 (cu128 PyTorch wheel) |
+| Python | 3.12 (system default) |
+
 ---
 
 ## Installation
 
-### 1. Verify GPU and CUDA
+### Ubuntu 22.04 LTS (RTX 3070 Ti / Cloud)
+
+#### 1. Verify GPU and CUDA
 
 ```bash
 nvidia-smi
 nvcc --version
 ```
 
-### 2. Install system dependencies
+#### 2. Install system dependencies
 
 ```bash
 sudo apt update && sudo apt upgrade -y
@@ -53,7 +71,7 @@ sudo apt install -y python3.11 python3.11-venv python3.11-dev \
 git lfs install
 ```
 
-### 3. Create virtual environment
+#### 3. Create virtual environment
 
 ```bash
 mkdir ~/CNEE && cd ~/CNEE
@@ -62,7 +80,7 @@ source .venv/bin/activate
 pip install --upgrade pip setuptools wheel
 ```
 
-### 4. Install PyTorch with CUDA 12.8
+#### 4. Install PyTorch with CUDA 12.8
 
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
@@ -80,7 +98,7 @@ print('VRAM:', round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1),
 "
 ```
 
-### 5. Install Unsloth
+#### 5. Install Unsloth
 
 ```bash
 pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
@@ -93,14 +111,14 @@ Verify:
 python3 -c "import unsloth; print('Unsloth:', unsloth.__version__)"
 ```
 
-### 6. Install training dependencies
+#### 6. Install training dependencies
 
 ```bash
 pip install transformers accelerate peft bitsandbytes trl datasets
 pip install pillow qwen-vl-utils matplotlib
 ```
 
-### 7. Install Ollama (for inference)
+#### 7. Install Ollama (for inference)
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
@@ -109,9 +127,119 @@ ollama --version
 
 ---
 
+### NVIDIA DGX Spark (Ubuntu 24.04 LTS)
+
+The DGX Spark runs Ubuntu 24.04, which ships Python 3.12 by default. Python 3.11 is not available in the standard repositories and is not needed. PyTorch is installed using the `cu128` wheel, which runs correctly on CUDA 13.0 drivers due to backward compatibility.
+
+#### 1. Verify GPU and CUDA
+
+```bash
+nvcc --version   # Expected: CUDA 13.0
+tegrastats       # Monitor unified memory (replaces nvidia-smi for memory usage)
+```
+
+> `nvidia-smi` runs on the Spark but does not report VRAM the same way as discrete GPUs due to the unified memory architecture. Use `tegrastats` for memory monitoring, or check from Python (see step 4).
+
+#### 2. Install system dependencies
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y python3-dev python3-venv python3-pip \
+  build-essential git curl wget cmake ninja-build \
+  libssl-dev libffi-dev git-lfs \
+  libgl1 libglib2.0-0
+git lfs install
+```
+
+> On Ubuntu 24.04, `libgl1-mesa-glx` has been renamed to `libgl1`.
+
+#### 3. Create virtual environment (Python 3.12)
+
+```bash
+mkdir ~/CNEE && cd ~/CNEE
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip setuptools wheel
+```
+
+Add to `.bashrc` to activate automatically on every session:
+
+```bash
+echo "source ~/CNEE/.venv/bin/activate" >> ~/.bashrc
+```
+
+#### 4. Install PyTorch with CUDA 12.8 (compatible with CUDA 13.0)
+
+```bash
+pip install torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu128
+```
+
+Verify GPU access:
+
+```bash
+python3 -c "
+import torch
+print('PyTorch:', torch.__version__)
+print('CUDA available:', torch.cuda.is_available())
+print('GPU:', torch.cuda.get_device_name(0))
+print('VRAM:', round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1), 'GB')
+"
+```
+
+Expected output on DGX Spark:
+
+```
+PyTorch: 2.11.0+cu128
+CUDA available: True
+GPU: NVIDIA GB10
+VRAM: 130.7 GB
+```
+
+#### 5. Install Unsloth
+
+```bash
+pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
+pip install unsloth-zoo
+```
+
+Verify:
+
+```bash
+python3 -c "import unsloth; print('Unsloth:', unsloth.__version__)"
+```
+
+#### 6. Install training dependencies
+
+```bash
+pip install transformers accelerate peft bitsandbytes trl datasets
+pip install pillow qwen-vl-utils matplotlib
+```
+
+#### DGX Spark — Verified package versions
+
+| Package | Version |
+|---|---|
+| Python | 3.12 |
+| PyTorch | 2.11.0+cu128 |
+| CUDA Toolkit | 13.0 (cu128 wheel) |
+| OS | DGX OS — Ubuntu 24.04 LTS |
+
+#### DGX Spark — Training differences vs RTX 3070 Ti
+
+| Parameter | RTX 3070 Ti | DGX Spark |
+|---|---|---|
+| `load_in_4bit` | `True` (QLoRA required) | `False` (LoRA BF16, full precision) |
+| `MAX_IMAGENES` | 3–5 (truncation risk) | Full case file, no limit |
+| `max_seq_length` | 8192 | 32768+ |
+| LoRA rank | 16–32 | 64–128 |
+| Models supported | 2B, 4B | 2B, 4B, 8B |
+
+---
+
 ## Verified Package Versions
 
-The following versions were successfully tested on Ubuntu 22.04 + RTX 3070 Ti Laptop (8 GB VRAM):
+### Ubuntu 22.04 — RTX 3070 Ti Laptop (8 GB VRAM)
 
 | Package | Version |
 |---|---|
@@ -125,6 +253,18 @@ The following versions were successfully tested on Ubuntu 22.04 + RTX 3070 Ti La
 | bitsandbytes | — (installed with Unsloth) |
 | CUDA Toolkit | 12.8 |
 | NVIDIA Driver | 580.126.09 |
+
+### Ubuntu 24.04 — NVIDIA DGX Spark (130.7 GB unified memory)
+
+| Package | Version |
+|---|---|
+| Python | 3.12 |
+| PyTorch | 2.11.0+cu128 |
+| Unsloth | 2026.3.11 |
+| Transformers | 5.2.0 |
+| Datasets | 4.3.0 |
+| CUDA Toolkit | 13.0 (cu128 wheel) |
+| GPU | NVIDIA GB10 Blackwell |
 
 ---
 
@@ -236,6 +376,8 @@ NUM_EPOCHS   = 7        # Number of epochs
 OUTPUT_DIR   = "..."    # Output directory
 MODEL_PATH   = "..."    # Path to base model
 ```
+
+> **DGX Spark:** Set `MAX_IMAGENES` to the full number of pages in the case file and `load_in_4bit=False` to use LoRA BF16 instead of QLoRA.
 
 ### Model evaluation
 
@@ -390,6 +532,9 @@ source ~/.bashrc
 | `datasets version incompatible` | Version conflict | `pip install "datasets>=3.4.1,<4.4.0,!=4.0.*,!=4.1.0"` |
 | `torchao incompatible` | Non-critical warning | Ignore, does not affect training |
 | `generate-parameter-library-py` | ROS package without dependencies | `pip install jinja2 typeguard` (optional) |
+| `Unable to locate package python3.11` | Ubuntu 24.04 ships with Python 3.12 | Use `python3 -m venv` instead of `python3.11 -m venv` |
+| `Package 'libgl1-mesa-glx' not found` | Renamed in Ubuntu 24.04 | Replace with `libgl1` |
+| No `cu130` PyTorch wheel | PyTorch does not yet publish cu130 builds | Use `cu128` — fully compatible with CUDA 13.0 drivers |
 
 ---
 
@@ -404,6 +549,18 @@ Results obtained with Qwen3-VL-2B, 5 epochs, 3 images/case, RTX 3070 Ti Laptop:
 | Precision | TP / (TP + FP) for APPROVED class |
 | Recall | TP / (TP + FN) for APPROVED class |
 | F1-Score | Harmonic mean of Precision and Recall |
+
+Results obtained with Qwen3-VL-4B, 25 epochs, 8 images/case, AWS g5.2xlarge (A10G 24 GB):
+
+| Metric | Value |
+|---|---|
+| VQA Accuracy | 80.0% |
+| Precision | 71.4% |
+| Recall | 100.0% |
+| F1-Score | 83.3% |
+| Best checkpoint | Epoch 21 (checkpoint-126) |
+| Training time | ~4 hours |
+| Inference time | ~59 s/case (4096 tokens) |
 
 ---
 
