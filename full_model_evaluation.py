@@ -1,14 +1,11 @@
 """
-Script de evaluacion del modelo Qwen3-VL fine-tuned (v3) con escalacion
-por reglas y confidence recalculado.
+Script de evaluacion del modelo Qwen3-VL fine-tuned (v3) en el DATASET COMPLETO
+con escalacion por reglas y confidence recalculado.
 
-FLUJO:
-  1. Inferencia del modelo → texto JSON predicho
-  2. Re-contar criterios cumplidos (cumple:true en criterios.{})
-  3. Aplicar reglas del prompt CNEE para decision_regla
-  4. Calcular confidence_real basado en criterios
-  5. Si confidence_real < 0.75 → REQUIERE_REVISION_MANUAL
-  6. Reportar metricas: modelo original Y sistema con escalacion
+Reporta metricas separadas para:
+  - Casos TRAIN (90): senal de memorizacion/training exitoso
+  - Casos VAL (10):   senal real de generalizacion
+  - TOTAL (100):      panorama completo
 """
 
 import json
@@ -28,14 +25,14 @@ from PIL import Image
 torch._dynamo.config.disable = True
 os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
-print("=== Evaluacion del Modelo Qwen3-VL con Escalacion por Reglas ===\n")
+print("=== Evaluacion del Modelo Qwen3-VL en Dataset COMPLETO con Reglas ===\n")
 
 # ══════════════════════════════════════════
 # Configuracion
 # ══════════════════════════════════════════
-MAX_IMAGENES        = 16     # Coincide con training
-MAX_NEW_TOKENS      = 2048   # Suficiente para esquema comprimido
-THRESHOLD_REVISION  = 0.75   # confidence_real bajo este valor → REQUIERE_REVISION
+MAX_IMAGENES        = 16
+MAX_NEW_TOKENS      = 4096 # Se puede ajustar a 2048 para reducir tiempos, pero con 1 caso truncado y respuesta incompleta, la mayoria necesita 1024
+THRESHOLD_REVISION  = 0.75
 OUTPUT_DIR          = "/home/nvidia-ott/lsdc/cnee-native/output/qwen3vl_4b_v3"
 MODEL_PATH          = "/home/nvidia-ott/lsdc/cnee-native/output/qwen3vl_4b_v3/final"
 DATASET_PATH        = "/home/nvidia-ott/lsdc/cnee-native/dataset/dataset_FINAL_rev_100casos_v5.json"
@@ -61,37 +58,39 @@ print(f"MAX_IMAGENES: {MAX_IMAGENES} | MAX_NEW_TOKENS: {MAX_NEW_TOKENS} | "
       f"THRESHOLD_REVISION: {THRESHOLD_REVISION}")
 
 # ══════════════════════════════════════════
-# 2. Cargar dataset y crear split
+# 2. Cargar dataset y reconstruir split (mismo seed que en training)
 # ══════════════════════════════════════════
 print("\nCargando dataset...")
 with open(DATASET_PATH) as f:
     data = json.load(f)
 
 casos = data["casos"]
+n_total = len(casos)
 
+# MISMA semilla que en training para que train/val coincida
 random.seed(42)
 grupos = defaultdict(list)
 for i, caso in enumerate(casos):
     grupos[caso["metadata"]["label"]].append(i)
 
-val_indices = []
+val_indices_set = set()
 for label, indices in grupos.items():
     n_val = max(1, int(len(indices) * 0.1))
-    val_indices.extend(random.sample(indices, n_val))
+    val_indices_set.update(random.sample(indices, n_val))
 
-print(f"Casos en validacion: {len(val_indices)}")
+print(f"Total casos:    {n_total}")
+print(f"  Train:        {n_total - len(val_indices_set)}")
+print(f"  Validation:   {len(val_indices_set)}")
 
 # ══════════════════════════════════════════
 # 3. Funciones auxiliares
 # ══════════════════════════════════════════
-print("\n=== Evaluacion del modelo en set de validacion ===")
+print("\n=== Evaluacion en dataset COMPLETO ===")
 FastVisionModel.for_inference(model)
-
-eval_casos = [casos[i] for i in val_indices]
 
 
 def extraer_decision(texto):
-    """Extrae la decision APROBADO/RECHAZADO del JSON generado."""
+    """Extrae APROBADO/RECHAZADO/DESCONOCIDO del texto generado."""
     match = re.search(r'"decision"\s*:\s*"(APROBADO|RECHAZADO)"', texto)
     if match:
         return match.group(1)
@@ -103,20 +102,7 @@ def extraer_decision(texto):
 
 
 def calcular_decision_por_reglas(prediccion_texto):
-    """
-    Aplica las reglas del prompt CNEE para determinar decision y confidence reales.
-
-    REGLAS:
-      - causa_fuerza_mayor.cumple = false      → RECHAZADO (conf 0.90)
-      - causa_FM=true Y cumplidos = 7          → APROBADO (conf 0.95)
-      - causa_FM=true Y cumplidos = 6          → APROBADO (conf 0.82)
-      - causa_FM=true Y cumplidos = 5          → APROBADO (conf 0.65, zona gris)
-      - causa_FM=true Y cumplidos < 5          → RECHAZADO (conf 0.55, dudoso)
-      - JSON invalido o sin estructura         → INDETERMINADO
-
-    ESCALACION:
-      - confidence_real < THRESHOLD_REVISION   → REQUIERE_REVISION_MANUAL
-    """
+    """Aplica reglas del prompt CNEE y escala si confidence_real < threshold."""
     try:
         parsed = json.loads(prediccion_texto)
     except (json.JSONDecodeError, TypeError):
@@ -140,19 +126,16 @@ def calcular_decision_por_reglas(prediccion_texto):
             'motivo':                   'sin_criterios',
         }
 
-    # Re-contar (no confiar en el campo del modelo)
     criterios_cumplidos_real = sum(
         1 for c in criterios.values() if c.get('cumple') is True
     )
     causa_fm = criterios.get('causa_fuerza_mayor', {})
     causa_fm_cumple = causa_fm.get('cumple')
 
-    # ── Aplicar reglas ──
     if causa_fm_cumple is False:
         decision_regla = 'RECHAZADO'
         confidence_real = 0.90
         motivo = 'causa_FM_no_cumple'
-
     elif causa_fm_cumple is True and criterios_cumplidos_real >= 5:
         decision_regla = 'APROBADO'
         if criterios_cumplidos_real == 7:
@@ -161,21 +144,18 @@ def calcular_decision_por_reglas(prediccion_texto):
         elif criterios_cumplidos_real == 6:
             confidence_real = 0.82
             motivo = 'aprobado_6de7'
-        else:  # 5
+        else:
             confidence_real = 0.65
             motivo = 'aprobado_5de7_zona_gris'
-
     elif causa_fm_cumple is True and criterios_cumplidos_real < 5:
         decision_regla = 'RECHAZADO'
         confidence_real = 0.55
         motivo = 'rechazado_causa_ok_pero_docs_insuficientes'
-
     else:
         decision_regla = 'INDETERMINADO'
         confidence_real = 0.0
         motivo = 'causa_FM_no_determinable'
 
-    # ── Escalacion ──
     if decision_regla == 'INDETERMINADO':
         decision_final = 'REQUIERE_REVISION_MANUAL'
         motivo_final = motivo
@@ -197,7 +177,7 @@ def calcular_decision_por_reglas(prediccion_texto):
 
 
 def inferir_caso(caso):
-    """Ejecuta inferencia. Retorna: (texto_generado, n_tokens, truncado)"""
+    """Ejecuta inferencia. Retorna (texto, n_tokens, truncado)."""
     imagenes = caso["images"][:MAX_IMAGENES]
     rutas    = [f"{BASE}/{img}" for img in imagenes]
 
@@ -246,15 +226,20 @@ def inferir_caso(caso):
 
 
 # ══════════════════════════════════════════
-# 4. Loop de evaluacion
+# 4. Loop de evaluacion sobre TODOS los casos
 # ══════════════════════════════════════════
 resultados = []
 tiempos_casos = []
 total_inicio = time.time()
 
-for i, caso in enumerate(eval_casos):
+print(f"\nEvaluando {n_total} casos. ETA estimado: {n_total * 15 / 60:.0f} minutos\n")
+
+for i, caso in enumerate(casos):
     caso_inicio = time.time()
-    print(f"\n  Caso {i+1}/{len(eval_casos)}: {caso['id']}...")
+    es_validacion = i in val_indices_set
+    tipo = 'VAL' if es_validacion else 'TRN'
+
+    print(f"  [{i+1:3d}/{n_total}] [{tipo}] {caso['id']}...", end='', flush=True)
 
     ground_truth = ""
     for item in caso["messages"][1]["content"]:
@@ -265,19 +250,16 @@ for i, caso in enumerate(eval_casos):
     prediccion, n_tokens, truncado = inferir_caso(caso)
     tiempo_caso = time.time() - caso_inicio
 
-    # Decision del modelo (lectura directa)
     label_pred_modelo = extraer_decision(prediccion)
     vqa_ok_modelo = (label_pred_modelo == label_real)
     exact = (ground_truth.strip() == prediccion.strip())
 
-    # Decision por reglas + escalacion
     analisis = calcular_decision_por_reglas(prediccion)
     decision_final = analisis['decision_final']
 
-    # Clasificar resultado final
     if decision_final == 'REQUIERE_REVISION_MANUAL':
         estado = 'ESC'
-        es_correcto_auto = None  # No aplica, se escalo
+        es_correcto_auto = None
     elif decision_final == label_real:
         estado = 'OK'
         es_correcto_auto = True
@@ -287,13 +269,14 @@ for i, caso in enumerate(eval_casos):
 
     tiempos_casos.append(tiempo_caso)
 
-    print(f"    Real: {label_real:<10} | Modelo: {label_pred_modelo:<11} | "
-          f"Final: {decision_final:<25} | C: {analisis['criterios_cumplidos_real']}/7 | "
-          f"Conf: {analisis['confidence_real']:.2f} | {estado} | "
-          f"Tokens: {n_tokens:>4} | Tiempo: {tiempo_caso:.1f}s")
+    print(f" Real:{label_real[:4]:<4} Modelo:{label_pred_modelo[:4]:<4} "
+          f"Final:{decision_final[:4]:<4} C:{analisis['criterios_cumplidos_real']}/7 "
+          f"Conf:{analisis['confidence_real']:.2f} {estado} "
+          f"Tok:{n_tokens:>4} {tiempo_caso:.0f}s")
 
     resultados.append({
         "caso":                     caso["id"],
+        "es_validacion":            es_validacion,
         "label_real":               label_real,
         "label_pred_modelo":        label_pred_modelo,
         "decision_regla":           analisis['decision_regla'],
@@ -314,109 +297,145 @@ for i, caso in enumerate(eval_casos):
 tiempo_total = time.time() - total_inicio
 
 # ══════════════════════════════════════════
-# 5. Calculo de metricas
+# 5. Funciones de calculo de metricas
 # ══════════════════════════════════════════
-n_val = len(eval_casos)
+def calcular_metricas(subset):
+    """Calcula metricas sobre un subconjunto de resultados."""
+    n = len(subset)
+    if n == 0:
+        return None
 
-# ── Metricas del MODELO ORIGINAL (sin reglas) ──
-vqa_correct_modelo = sum(1 for r in resultados if r["vqa_ok_modelo"])
-exact_matches = sum(1 for r in resultados if r["exact_match"])
+    vqa_modelo = sum(1 for r in subset if r["vqa_ok_modelo"])
+    exact_m    = sum(1 for r in subset if r["exact_match"])
 
-tp_m = sum(1 for r in resultados if r["label_real"]=="APROBADO"  and r["label_pred_modelo"]=="APROBADO")
-tn_m = sum(1 for r in resultados if r["label_real"]=="RECHAZADO" and r["label_pred_modelo"]=="RECHAZADO")
-fp_m = sum(1 for r in resultados if r["label_real"]=="RECHAZADO" and r["label_pred_modelo"]=="APROBADO")
-fn_m = sum(1 for r in resultados if r["label_real"]=="APROBADO"  and r["label_pred_modelo"]=="RECHAZADO")
+    tp_m = sum(1 for r in subset if r["label_real"]=="APROBADO"  and r["label_pred_modelo"]=="APROBADO")
+    tn_m = sum(1 for r in subset if r["label_real"]=="RECHAZADO" and r["label_pred_modelo"]=="RECHAZADO")
+    fp_m = sum(1 for r in subset if r["label_real"]=="RECHAZADO" and r["label_pred_modelo"]=="APROBADO")
+    fn_m = sum(1 for r in subset if r["label_real"]=="APROBADO"  and r["label_pred_modelo"]=="RECHAZADO")
 
-prec_m = tp_m / (tp_m + fp_m) if (tp_m + fp_m) > 0 else 0
-rec_m  = tp_m / (tp_m + fn_m) if (tp_m + fn_m) > 0 else 0
-f1_m   = 2 * prec_m * rec_m / (prec_m + rec_m) if (prec_m + rec_m) > 0 else 0
+    prec_m = tp_m / (tp_m + fp_m) if (tp_m + fp_m) > 0 else 0
+    rec_m  = tp_m / (tp_m + fn_m) if (tp_m + fn_m) > 0 else 0
+    f1_m   = 2 * prec_m * rec_m / (prec_m + rec_m) if (prec_m + rec_m) > 0 else 0
 
-# ── Metricas del SISTEMA COMPLETO (con reglas + escalacion) ──
-n_aprobado_auto  = sum(1 for r in resultados if r["decision_final"] == "APROBADO")
-n_rechazado_auto = sum(1 for r in resultados if r["decision_final"] == "RECHAZADO")
-n_escalados     = sum(1 for r in resultados if r["decision_final"] == "REQUIERE_REVISION_MANUAL")
+    n_apr  = sum(1 for r in subset if r["decision_final"] == "APROBADO")
+    n_rch  = sum(1 for r in subset if r["decision_final"] == "RECHAZADO")
+    n_esc  = sum(1 for r in subset if r["decision_final"] == "REQUIERE_REVISION_MANUAL")
+    corr   = sum(1 for r in subset if r["es_correcto_auto"] is True)
+    incorr = sum(1 for r in subset if r["es_correcto_auto"] is False)
 
-correctos_auto   = sum(1 for r in resultados if r["es_correcto_auto"] is True)
-incorrectos_auto = sum(1 for r in resultados if r["es_correcto_auto"] is False)
+    tp_s = sum(1 for r in subset if r["label_real"]=="APROBADO"  and r["decision_final"]=="APROBADO")
+    tn_s = sum(1 for r in subset if r["label_real"]=="RECHAZADO" and r["decision_final"]=="RECHAZADO")
+    fp_s = sum(1 for r in subset if r["label_real"]=="RECHAZADO" and r["decision_final"]=="APROBADO")
+    fn_s = sum(1 for r in subset if r["label_real"]=="APROBADO"  and r["decision_final"]=="RECHAZADO")
 
-n_automaticos = n_val - n_escalados
+    prec_s = tp_s / (tp_s + fp_s) if (tp_s + fp_s) > 0 else 0
+    rec_s  = tp_s / (tp_s + fn_s) if (tp_s + fn_s) > 0 else 0
+    f1_s   = 2 * prec_s * rec_s / (prec_s + rec_s) if (prec_s + rec_s) > 0 else 0
 
-# Metricas confusion matrix sobre solo los automaticos
-tp_s = sum(1 for r in resultados if r["label_real"]=="APROBADO"  and r["decision_final"]=="APROBADO")
-tn_s = sum(1 for r in resultados if r["label_real"]=="RECHAZADO" and r["decision_final"]=="RECHAZADO")
-fp_s = sum(1 for r in resultados if r["label_real"]=="RECHAZADO" and r["decision_final"]=="APROBADO")
-fn_s = sum(1 for r in resultados if r["label_real"]=="APROBADO"  and r["decision_final"]=="RECHAZADO")
+    return {
+        'n':              n,
+        'vqa_modelo':     vqa_modelo,
+        'vqa_pct':        vqa_modelo / n * 100,
+        'exact_match':    exact_m,
+        'exact_pct':      exact_m / n * 100,
+        'precision_m':    prec_m,
+        'recall_m':       rec_m,
+        'f1_m':           f1_m,
+        'confusion_m':    {"tp": tp_m, "tn": tn_m, "fp": fp_m, "fn": fn_m},
+        'n_aprobado':     n_apr,
+        'n_rechazado':    n_rch,
+        'n_escalado':     n_esc,
+        'correctos_auto': corr,
+        'incorrectos_auto': incorr,
+        'tasa_auto_segura':   corr / n * 100,
+        'tasa_falsos_auto':   incorr / n * 100,
+        'tasa_escalacion':    n_esc / n * 100,
+        'precision_s':    prec_s,
+        'recall_s':       rec_s,
+        'f1_s':           f1_s,
+        'confusion_s':    {"tp": tp_s, "tn": tn_s, "fp": fp_s, "fn": fn_s},
+    }
 
-prec_s = tp_s / (tp_s + fp_s) if (tp_s + fp_s) > 0 else 0
-rec_s  = tp_s / (tp_s + fn_s) if (tp_s + fn_s) > 0 else 0
-f1_s   = 2 * prec_s * rec_s / (prec_s + rec_s) if (prec_s + rec_s) > 0 else 0
 
-# Stats auxiliares
+def imprimir_metricas(m, titulo):
+    print(f"\n{'='*70}")
+    print(f"  {titulo}  (n={m['n']})")
+    print(f"{'='*70}")
+    print(f"  MODELO ORIGINAL:")
+    print(f"    VQA Accuracy: {m['vqa_modelo']}/{m['n']} ({m['vqa_pct']:.1f}%)  "
+          f"| Precision: {m['precision_m']:.3f}  Recall: {m['recall_m']:.3f}  F1: {m['f1_m']:.3f}")
+    print(f"    Confusion: TP={m['confusion_m']['tp']} TN={m['confusion_m']['tn']} "
+          f"FP={m['confusion_m']['fp']} FN={m['confusion_m']['fn']}")
+    print(f"  SISTEMA HIBRIDO (modelo + reglas + escalacion):")
+    print(f"    APROBADO auto:   {m['n_aprobado']:>3} ({m['n_aprobado']/m['n']*100:.1f}%)")
+    print(f"    RECHAZADO auto:  {m['n_rechazado']:>3} ({m['n_rechazado']/m['n']*100:.1f}%)")
+    print(f"    ESCALADO:        {m['n_escalado']:>3} ({m['n_escalado']/m['n']*100:.1f}%)")
+    print(f"    Tasa automatizacion segura: {m['tasa_auto_segura']:.1f}%")
+    print(f"    Tasa falsos positivos auto: {m['tasa_falsos_auto']:.1f}%")
+    print(f"    Confusion (auto): TP={m['confusion_s']['tp']} TN={m['confusion_s']['tn']} "
+          f"FP={m['confusion_s']['fp']} FN={m['confusion_s']['fn']}  "
+          f"P={m['precision_s']:.3f} R={m['recall_s']:.3f} F1={m['f1_s']:.3f}")
+
+
+# ══════════════════════════════════════════
+# 6. Calcular metricas por subset
+# ══════════════════════════════════════════
+res_train = [r for r in resultados if not r["es_validacion"]]
+res_val   = [r for r in resultados if r["es_validacion"]]
+
+m_total = calcular_metricas(resultados)
+m_train = calcular_metricas(res_train)
+m_val   = calcular_metricas(res_val)
+
+imprimir_metricas(m_train, "CASOS DE TRAINING (memorizacion / sanity check)")
+imprimir_metricas(m_val,   "CASOS DE VALIDATION (generalizacion real)")
+imprimir_metricas(m_total, "DATASET COMPLETO")
+
+# ══════════════════════════════════════════
+# 7. Cases que el modelo falla
+# ══════════════════════════════════════════
+print(f"\n{'='*70}")
+print(f"  CASOS DONDE EL MODELO ORIGINAL FALLA (sin reglas)")
+print(f"{'='*70}")
+fallos_modelo = [r for r in resultados if not r["vqa_ok_modelo"]]
+print(f"  Total fallos modelo: {len(fallos_modelo)}/{n_total}")
+for r in fallos_modelo:
+    tipo = 'VAL' if r["es_validacion"] else 'TRN'
+    print(f"    [{tipo}] {r['caso']}: real={r['label_real']:<10} "
+          f"pred={r['label_pred_modelo']:<12} criterios={r['criterios_cumplidos_real']}/7  "
+          f"motivo={r['motivo']}")
+
+print(f"\n{'='*70}")
+print(f"  CASOS DONDE EL SISTEMA HIBRIDO FALLA AUTOMATICAMENTE")
+print(f"{'='*70}")
+fallos_sistema = [r for r in resultados if r["es_correcto_auto"] is False]
+print(f"  Total fallos automaticos: {len(fallos_sistema)}/{n_total}")
+for r in fallos_sistema:
+    tipo = 'VAL' if r["es_validacion"] else 'TRN'
+    print(f"    [{tipo}] {r['caso']}: real={r['label_real']:<10} "
+          f"final={r['decision_final']:<12} conf={r['confidence_real']:.2f}  "
+          f"motivo={r['motivo']}")
+
+# ══════════════════════════════════════════
+# 8. Tiempos y tokens
+# ══════════════════════════════════════════
 tokens_lista = [r["tokens_generados"] for r in resultados]
 n_truncados  = sum(1 for r in resultados if r["truncado"])
 
-# ══════════════════════════════════════════
-# 6. Reporte en consola
-# ══════════════════════════════════════════
-print(f"\n{'='*65}")
-print(f"METRICAS DEL MODELO ORIGINAL (sin reglas)")
-print(f"{'='*65}")
-print(f"  VQA Accuracy:   {vqa_correct_modelo}/{n_val}  ({vqa_correct_modelo/n_val*100:.1f}%)")
-print(f"  Precision:      {prec_m:.3f}")
-print(f"  Recall:         {rec_m:.3f}")
-print(f"  F1-Score:       {f1_m:.3f}")
-print(f"  TP={tp_m}  TN={tn_m}  FP={fp_m}  FN={fn_m}")
-
-print(f"\n{'='*65}")
-print(f"METRICAS DEL SISTEMA HIBRIDO (modelo + reglas + escalacion)")
-print(f"{'='*65}")
-print(f"  Distribucion de decisiones finales:")
-print(f"    APROBADO automatico:     {n_aprobado_auto}/{n_val}  "
-      f"({n_aprobado_auto/n_val*100:.1f}%)")
-print(f"    RECHAZADO automatico:    {n_rechazado_auto}/{n_val}  "
-      f"({n_rechazado_auto/n_val*100:.1f}%)")
-print(f"    REQUIERE_REVISION:       {n_escalados}/{n_val}  "
-      f"({n_escalados/n_val*100:.1f}%)")
-print()
-print(f"  De los {n_automaticos} casos automaticos:")
-if n_automaticos > 0:
-    print(f"    Correctos:    {correctos_auto}/{n_automaticos}  "
-          f"({correctos_auto/n_automaticos*100:.1f}%)")
-    print(f"    Incorrectos:  {incorrectos_auto}/{n_automaticos}  "
-          f"({incorrectos_auto/n_automaticos*100:.1f}%)")
-print()
-print(f"  Indicadores de produccion:")
-print(f"    Tasa automatizacion segura:  {correctos_auto/n_val*100:.1f}%")
-print(f"    Tasa falsos positivos auto:  {incorrectos_auto/n_val*100:.1f}%")
-print(f"    Tasa escalacion humana:      {n_escalados/n_val*100:.1f}%")
-print()
-print(f"  Confusion matrix (solo automaticos):")
-print(f"    TP={tp_s}  TN={tn_s}  FP={fp_s}  FN={fn_s}")
-print(f"    Precision: {prec_s:.3f}  Recall: {rec_s:.3f}  F1: {f1_s:.3f}")
-
-print(f"\n{'─'*65}")
-print(f"TIEMPOS DE INFERENCIA")
-print(f"{'─'*65}")
-print(f"  Tiempo total:     {tiempo_total:.1f}s ({tiempo_total/60:.1f} min)")
-print(f"  Tiempo promedio:  {tiempo_total/n_val:.1f}s/caso")
-print(f"  Caso mas rapido:  {min(tiempos_casos):.1f}s")
-print(f"  Caso mas lento:   {max(tiempos_casos):.1f}s")
-
-print(f"\n{'─'*65}")
-print(f"TOKENS GENERADOS")
-print(f"{'─'*65}")
-print(f"  Min:     {min(tokens_lista)}")
-print(f"  Media:   {int(np.mean(tokens_lista))}")
-print(f"  P50:     {int(np.median(tokens_lista))}")
-print(f"  P95:     {int(np.percentile(tokens_lista, 95))}")
-print(f"  Max:     {max(tokens_lista)}")
-print(f"  Truncados: {n_truncados}/{n_val}")
-print(f"{'='*65}")
+print(f"\n{'='*70}")
+print(f"  TIEMPOS Y TOKENS")
+print(f"{'='*70}")
+print(f"  Tiempo total: {tiempo_total:.0f}s ({tiempo_total/60:.1f} min)")
+print(f"  Promedio:     {tiempo_total/n_total:.1f}s/caso")
+print(f"  Tokens: min={min(tokens_lista)} media={int(np.mean(tokens_lista))} "
+      f"P50={int(np.median(tokens_lista))} P95={int(np.percentile(tokens_lista,95))} "
+      f"max={max(tokens_lista)}")
+print(f"  Truncados: {n_truncados}/{n_total} ({n_truncados/n_total*100:.1f}%)")
 
 # ══════════════════════════════════════════
-# 7. Guardar JSON
+# 9. Guardar JSON
 # ══════════════════════════════════════════
-metricas_output = {
+output = {
     "config": {
         "max_imagenes":       MAX_IMAGENES,
         "max_new_tokens":     MAX_NEW_TOKENS,
@@ -424,32 +443,15 @@ metricas_output = {
         "model_path":         MODEL_PATH,
         "dataset_path":       DATASET_PATH,
     },
-    "n_val": n_val,
-    "metricas_modelo_original": {
-        "vqa_accuracy":     vqa_correct_modelo / n_val * 100,
-        "exact_match":      exact_matches / n_val * 100,
-        "precision":        prec_m,
-        "recall":           rec_m,
-        "f1":               f1_m,
-        "confusion_matrix": {"tp": tp_m, "tn": tn_m, "fp": fp_m, "fn": fn_m},
-    },
-    "metricas_sistema_hibrido": {
-        "n_aprobado_auto":          n_aprobado_auto,
-        "n_rechazado_auto":         n_rechazado_auto,
-        "n_escalados":              n_escalados,
-        "correctos_auto":           correctos_auto,
-        "incorrectos_auto":         incorrectos_auto,
-        "tasa_automatizacion_segura": round(correctos_auto / n_val * 100, 2),
-        "tasa_falsos_positivos_auto": round(incorrectos_auto / n_val * 100, 2),
-        "tasa_escalacion":          round(n_escalados / n_val * 100, 2),
-        "precision_auto":           prec_s,
-        "recall_auto":              rec_s,
-        "f1_auto":                  f1_s,
-        "confusion_matrix_auto":    {"tp": tp_s, "tn": tn_s, "fp": fp_s, "fn": fn_s},
-    },
+    "n_total":  n_total,
+    "n_train":  len(res_train),
+    "n_val":    len(res_val),
+    "metricas_train": m_train,
+    "metricas_val":   m_val,
+    "metricas_total": m_total,
     "tiempos": {
         "tiempo_total_s":    round(tiempo_total, 2),
-        "tiempo_promedio_s": round(tiempo_total / n_val, 2),
+        "tiempo_promedio_s": round(tiempo_total / n_total, 2),
         "tiempo_minimo_s":   round(min(tiempos_casos), 2),
         "tiempo_maximo_s":   round(max(tiempos_casos), 2),
     },
@@ -460,98 +462,112 @@ metricas_output = {
         "p95":           int(np.percentile(tokens_lista, 95)),
         "max":           int(max(tokens_lista)),
         "n_truncados":   int(n_truncados),
-        "pct_truncados": round(n_truncados / n_val * 100, 2),
     },
     "resultados": resultados,
 }
-with open(f"{OUTPUT_DIR}/metricas_validacion.json", "w", encoding="utf-8") as f:
-    json.dump(metricas_output, f, ensure_ascii=False, indent=2)
-print(f"\nMetricas guardadas en: {OUTPUT_DIR}/metricas_validacion.json")
+output_path = f"{OUTPUT_DIR}/metricas_dataset_completo.json"
+with open(output_path, "w", encoding="utf-8") as f:
+    json.dump(output, f, ensure_ascii=False, indent=2)
+print(f"\nMetricas guardadas en: {output_path}")
 
 # ══════════════════════════════════════════
-# 8. Grafica de evaluacion (2x2 = 4 paneles)
+# 10. Grafica
 # ══════════════════════════════════════════
 fig, axes = plt.subplots(2, 2, figsize=(15, 11))
-fig.suptitle("Evaluacion del Modelo Fine-tuned + Sistema Hibrido — Qwen3-VL 4B (CNEE)",
+fig.suptitle(f"Evaluacion Dataset Completo (n={n_total}) — Qwen3-VL 4B (CNEE)",
              fontsize=13, fontweight="bold")
 
-# Plot 1: Comparacion modelo vs sistema hibrido
+# Plot 1: Metricas modelo vs sistema, train vs val
 ax = axes[0, 0]
-labels = ['VQA\nAccuracy', 'Precision', 'Recall', 'F1-Score']
-vals_modelo = [vqa_correct_modelo/n_val*100, prec_m*100, rec_m*100, f1_m*100]
-vals_sistema = [correctos_auto/n_val*100, prec_s*100, rec_s*100, f1_s*100]
+labels = ['Train\n(modelo)', 'Train\n(sistema)', 'Val\n(modelo)', 'Val\n(sistema)']
+vals_acc = [
+    m_train['vqa_pct'],
+    m_train['tasa_auto_segura'],
+    m_val['vqa_pct'],
+    m_val['tasa_auto_segura'],
+]
+vals_fp  = [
+    m_train['confusion_m']['fp'] / m_train['n'] * 100,
+    m_train['tasa_falsos_auto'],
+    m_val['confusion_m']['fp'] / m_val['n'] * 100 if m_val['n'] > 0 else 0,
+    m_val['tasa_falsos_auto'],
+]
 
 x = np.arange(len(labels))
-width = 0.35
-b1 = ax.bar(x - width/2, vals_modelo, width, label='Modelo solo', color='#0D1B3E')
-b2 = ax.bar(x + width/2, vals_sistema, width, label='Sistema hibrido (auto)', color='#16A34A')
-ax.set_title("Metricas: Modelo vs Sistema con Escalacion")
+w = 0.35
+b1 = ax.bar(x - w/2, vals_acc, w, label='Accuracy / Auto correcto', color='#16A34A')
+b2 = ax.bar(x + w/2, vals_fp,  w, label='Falsos positivos', color='#DC2626')
+ax.set_title("Accuracy vs Falsos Positivos: Train vs Val")
 ax.set_ylabel("Porcentaje (%)")
 ax.set_xticks(x)
 ax.set_xticklabels(labels)
-ax.set_ylim(0, 120)
+ax.set_ylim(0, 110)
 ax.legend(fontsize=10)
 ax.grid(True, alpha=0.3, axis="y")
 for bars in [b1, b2]:
     for bar in bars:
         h = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2, h + 2, f"{h:.1f}",
-                ha='center', va='bottom', fontsize=9, fontweight='bold')
+        ax.text(bar.get_x() + bar.get_width()/2, h + 1, f"{h:.1f}",
+                ha='center', va='bottom', fontsize=8, fontweight='bold')
 
-# Plot 2: Distribucion de decisiones finales
+# Plot 2: Distribucion de decisiones finales (TOTAL)
 ax = axes[0, 1]
-cats = ['APROBADO\nautomatico', 'RECHAZADO\nautomatico', 'REQUIERE\nREVISION']
-vals = [n_aprobado_auto, n_rechazado_auto, n_escalados]
+cats = ['APROBADO\nauto', 'RECHAZADO\nauto', 'REQUIERE\nREVISION']
+vals = [m_total['n_aprobado'], m_total['n_rechazado'], m_total['n_escalado']]
 cols = ['#16A34A', '#0D1B3E', '#F59E0B']
 bars = ax.bar(cats, vals, color=cols, width=0.6)
-ax.set_title("Distribucion de Decisiones Finales del Sistema")
+ax.set_title(f"Distribucion de Decisiones Finales (n={n_total})")
 ax.set_ylabel("Cantidad de casos")
 ax.grid(True, alpha=0.3, axis="y")
 for bar, v in zip(bars, vals):
-    pct = v / n_val * 100
-    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
+    pct = v / n_total * 100
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
             f"{v}\n({pct:.0f}%)", ha='center', va='bottom',
             fontweight='bold', fontsize=11)
 
-# Plot 3: Confusion matrix del sistema hibrido (solo automaticos)
+# Plot 3: Confusion matrix combinada (sistema, todos)
 ax = axes[1, 0]
-confusion = [[tp_s, fn_s], [fp_s, tn_s]]
-im = ax.imshow(confusion, cmap="Blues")
+n_auto_total = m_total['n'] - m_total['n_escalado']
+confusion = [[m_total['confusion_s']['tp'], m_total['confusion_s']['fn']],
+             [m_total['confusion_s']['fp'], m_total['confusion_s']['tn']]]
+ax.imshow(confusion, cmap="Blues")
 ax.set_xticks([0, 1])
 ax.set_yticks([0, 1])
 ax.set_xticklabels(["Pred APROBADO", "Pred RECHAZADO"])
 ax.set_yticklabels(["Real APROBADO", "Real RECHAZADO"])
-ax.set_title(f"Matriz de Confusion (solo {n_automaticos} automaticos)")
+ax.set_title(f"Matriz de Confusion - Sistema (auto, n={n_auto_total})")
 for i in range(2):
     for j in range(2):
         ax.text(j, i, str(confusion[i][j]),
-                ha="center", va="center",
-                fontsize=20, fontweight="bold",
-                color="white" if confusion[i][j] > n_automaticos/4 else "black")
+                ha="center", va="center", fontsize=20, fontweight="bold",
+                color="white" if confusion[i][j] > n_auto_total/4 else "black")
 
-# Plot 4: Indicadores de produccion
+# Plot 4: Indicadores comparados train vs val
 ax = axes[1, 1]
-indicadores = ['Auto\nSegura', 'Falsos+\nAuto', 'Escalacion\nHumana']
-vals_ind = [
-    correctos_auto / n_val * 100,
-    incorrectos_auto / n_val * 100,
-    n_escalados / n_val * 100,
-]
-cols_ind = ['#16A34A', '#DC2626', '#F59E0B']
-bars = ax.bar(indicadores, vals_ind, color=cols_ind, width=0.6)
-ax.set_title("Indicadores de Produccion")
+indicadores = ['Auto\nSegura', 'Falsos+\nAuto', 'Escalacion']
+vals_train = [m_train['tasa_auto_segura'], m_train['tasa_falsos_auto'], m_train['tasa_escalacion']]
+vals_val   = [m_val['tasa_auto_segura'],   m_val['tasa_falsos_auto'],   m_val['tasa_escalacion']]
+x = np.arange(len(indicadores))
+w = 0.35
+b1 = ax.bar(x - w/2, vals_train, w, label='Train', color='#0D1B3E')
+b2 = ax.bar(x + w/2, vals_val,   w, label='Val',   color='#00B4D8')
+ax.set_title("Indicadores Train vs Val")
 ax.set_ylabel("Porcentaje (%)")
+ax.set_xticks(x)
+ax.set_xticklabels(indicadores)
 ax.set_ylim(0, 110)
+ax.legend(fontsize=10)
 ax.grid(True, alpha=0.3, axis="y")
-for bar, v in zip(bars, vals_ind):
-    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2,
-            f"{v:.1f}%", ha='center', va='bottom',
-            fontweight='bold', fontsize=11)
+for bars in [b1, b2]:
+    for bar in bars:
+        h = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2, h + 1, f"{h:.1f}",
+                ha='center', va='bottom', fontsize=8, fontweight='bold')
 
 plt.tight_layout()
-eval_plot_path = f"{OUTPUT_DIR}/evaluacion_modelo_rules.png"
-plt.savefig(eval_plot_path, dpi=150, bbox_inches="tight")
+plot_path = f"{OUTPUT_DIR}/evaluacion_dataset_completo.png"
+plt.savefig(plot_path, dpi=150, bbox_inches="tight")
 plt.close()
-print(f"Grafica guardada en: {eval_plot_path}")
+print(f"Grafica guardada en: {plot_path}")
 
 print("\n=== Evaluacion completada ===")

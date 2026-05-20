@@ -20,12 +20,12 @@ os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
 print("=== Entrenamiento con Train y Val Loss ===")
 
-MAX_IMAGENES = 8
-OUTPUT_DIR   = "/home/ubuntu/cnee/output/qwen3vl_4b_v2"
-MODEL_PATH   = "/home/ubuntu/cnee/models/Qwen3-VL-4B-Instruct"
-DATASET_PATH = "/home/ubuntu/cnee/CNEE-QWEN3-VL-TrainingPipeline/dataset/dataset_FINAL_rev_100casos.json"
-BASE         = "/home/ubuntu/cnee/CNEE-QWEN3-VL-TrainingPipeline"
-NUM_EPOCHS   = 25 # <-- Cambiar aqui
+MAX_IMAGENES = 24
+OUTPUT_DIR   = "/home/nvidia-ott/lsdc/cnee-native/output/qwen3vl_4b_v3"
+MODEL_PATH   = "/home/nvidia-ott/lsdc/cnee-native/models/Qwen3-VL-4B-Instruct"
+DATASET_PATH = "/home/nvidia-ott/lsdc/cnee-native/dataset/dataset_FINAL_rev_100casos_v5.json"
+BASE         = "/home/nvidia-ott/lsdc/cnee-native"
+NUM_EPOCHS   = 15 # <-- Cambiar aqui
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -34,7 +34,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ══════════════════════════════════════════
 model, tokenizer = FastVisionModel.from_pretrained(
     model_name=MODEL_PATH,
-    load_in_4bit=True,
+    load_in_4bit=False, # True for QLoRA, False for LoRA
     use_gradient_checkpointing="unsloth",
 )
 MODEL_MAX_SEQ_LENGTH = getattr(model, "max_seq_length", 4096)
@@ -49,9 +49,9 @@ model = FastVisionModel.get_peft_model(
     finetune_language_layers=True,
     finetune_attention_modules=True,
     finetune_mlp_modules=True,
-    r=8,
-    lora_alpha=16,
-    lora_dropout=0.05,
+    r=64, # 8 for QLoRA, 64 for LoRA in Spark or even 128 for LoRA if VRAM allows
+    lora_alpha=64, # 16 for QLoRA, 64 for LoRA in Spark or even 128 for LoRA if VRAM allows
+    lora_dropout=0.05, 
     bias="none",
     random_state=42,
 )
@@ -180,26 +180,29 @@ trainer = SFTTrainer(
     callbacks=[loss_callback],
     args=SFTConfig(
         output_dir=OUTPUT_DIR,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=16,
+        per_device_train_batch_size=2,   # antes 1, ahora con gradient accumulation se simula 4
+        gradient_accumulation_steps=8,  # antes 16, ahora con batch_size 4 se acumula para simular 4
         gradient_checkpointing=True,
         num_train_epochs=NUM_EPOCHS,
         learning_rate=1e-4,
         bf16=True,
         logging_steps=steps_per_epoch,   # Log una vez por epoch
         save_strategy="epoch",
-        save_total_limit=2,
+        save_total_limit=3,              # Guardar checkpoints solo al final de cada epoch, mantener los ultimos 3  
         eval_strategy="epoch",           # Evaluar al final de cada epoch
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         report_to="none",
-        per_device_eval_batch_size=1,
+        per_device_eval_batch_size=2, # antes 1, ahora 2 para acelerar eval sin saturar memoria
         eval_accumulation_steps=1,
         remove_unused_columns=False,
         dataset_text_field="text",
         dataset_kwargs={"skip_prepare_dataset": True},
         max_seq_length=MODEL_MAX_SEQ_LENGTH,
+        # ── DataLoader workers ──────────────────────
+        # dataloader_num_workers=4,       # Solo 1 core estaba trabajando, ahora se distribuye en 4
+        # dataloader_pin_memory=False,    # Crítico en unified memory
     ),
 )
 
@@ -401,7 +404,7 @@ def inferir_caso(caso):
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=4096,
+            max_new_tokens=4096,    # Limite alto para asegurar que no se corte la respuesta completa
             temperature=0.1,
             do_sample=False,
         )
@@ -493,7 +496,7 @@ print(f"\nMetricas guardadas en: {OUTPUT_DIR}/metricas_validacion.json")
 # 10. Grafica de evaluacion
 # ══════════════════════════════════════════
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-fig.suptitle("Evaluacion del Modelo Fine-tuned — Qwen3-VL 2B (CNEE)",
+fig.suptitle("Evaluacion del Modelo Fine-tuned — Qwen3-VL 4B (CNEE)",
              fontsize=13, fontweight="bold")
 
 # Plot 1: Metricas principales
