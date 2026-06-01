@@ -27,11 +27,11 @@ print("=== Inferencia Qwen3-VL — Casos nuevos (no vistos en training) ===\n")
 # Configuracion
 # ══════════════════════════════════════════
 MAX_IMAGENES        = 16
-MAX_NEW_TOKENS      = 4096
+MAX_NEW_TOKENS      = 8192
 THRESHOLD_REVISION  = 0.75
-OUTPUT_DIR          = "/home/nvidia-ott/lsdc/cnee-native/output/inferencia"
+OUTPUT_DIR          = "/home/nvidia-ott/lsdc/cnee-native/output/inferencia_v2"
 MODEL_PATH          = "/home/nvidia-ott/lsdc/cnee-native/output/qwen3vl_4b_v3/final"
-DATASET_PATH        = "/home/nvidia-ott/lsdc/cnee-native/dataset/dataset_inferencia_test.json"
+DATASET_PATH        = "/home/nvidia-ott/lsdc/cnee-native/dataset/dataset_inferencia_test_v2.json"
 BASE                = "/home/nvidia-ott/lsdc/cnee-native"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
