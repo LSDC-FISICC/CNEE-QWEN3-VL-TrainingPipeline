@@ -33,12 +33,12 @@ print("=== Evaluacion del Modelo Qwen3-VL con Escalacion por Reglas ===\n")
 # ══════════════════════════════════════════
 # Configuracion
 # ══════════════════════════════════════════
-MAX_IMAGENES        = 16     # Coincide con training
-MAX_NEW_TOKENS      = 2048   # Suficiente para esquema comprimido
+MAX_IMAGENES        = 20     # Coincide con training
+MAX_NEW_TOKENS      = 8192   # Suficiente para esquema comprimido
 THRESHOLD_REVISION  = 0.75   # confidence_real bajo este valor → REQUIERE_REVISION
-OUTPUT_DIR          = "/home/nvidia-ott/lsdc/cnee-native/output/qwen3vl_4b_v3"
-MODEL_PATH          = "/home/nvidia-ott/lsdc/cnee-native/output/qwen3vl_4b_v3/final"
-DATASET_PATH        = "/home/nvidia-ott/lsdc/cnee-native/dataset/dataset_FINAL_rev_100casos_v5.json"
+OUTPUT_DIR          = "/home/nvidia-ott/lsdc/cnee-native/output/qwen3vl_8b_v2"
+MODEL_PATH          = "/home/nvidia-ott/lsdc/cnee-native/output/qwen3vl_8b_v2/final"
+DATASET_PATH        = "/home/nvidia-ott/lsdc/cnee-native/dataset/dataset_FINAL_rev_100casos_v6.json"
 BASE                = "/home/nvidia-ott/lsdc/cnee-native"
 
 # ══════════════════════════════════════════
@@ -472,7 +472,7 @@ print(f"\nMetricas guardadas en: {OUTPUT_DIR}/metricas_validacion.json")
 # 8. Grafica de evaluacion (2x2 = 4 paneles)
 # ══════════════════════════════════════════
 fig, axes = plt.subplots(2, 2, figsize=(15, 11))
-fig.suptitle("Evaluacion del Modelo Fine-tuned + Sistema Hibrido — Qwen3-VL 4B (CNEE)",
+fig.suptitle("Evaluacion del Modelo Fine-tuned + Sistema Hibrido — Qwen3-VL 8B (CNEE)",
              fontsize=13, fontweight="bold")
 
 # Plot 1: Comparacion modelo vs sistema hibrido

@@ -7,51 +7,72 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from collections import defaultdict
-from unsloth import FastVisionModel
+from unsloth import FastModel                       # <-- antes FastVisionModel
 from unsloth.trainer import UnslothVisionDataCollator
 from trl import SFTTrainer, SFTConfig
 from datasets import Dataset
-from transformers import TrainerCallback
+from transformers import TrainerCallback, StoppingCriteria, StoppingCriteriaList
 from PIL import Image
 import pyarrow as pa
 
 torch._dynamo.config.disable = True
 os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
-print("=== Entrenamiento con Train y Val Loss ===")
+print("=== Entrenamiento Qwen3.5-9B con Train y Val Loss ===")
 
 MAX_IMAGENES = 24
-OUTPUT_DIR   = "/home/nvidia-ott/lsdc/cnee-native/output/qwen3vl_8b_v2"
-MODEL_PATH   = "/home/nvidia-ott/lsdc/cnee-native/models/Qwen3-VL-8B-Instruct"
-DATASET_PATH = "/home/nvidia-ott/lsdc/cnee-native/dataset/dataset_FINAL_rev_100casos_v6.json"
+OUTPUT_DIR   = "/home/nvidia-ott/lsdc/cnee-native/output/qwen35_9b_v9"    # <-- run v10 NON-THINKING. Nombre alineado con la
+                                                                          #     version del dataset. NO reutilizar qwen35_9b_v6:
+                                                                          #     ese checkpoint lo lee la inferencia en curso.
+MODEL_PATH   = "/home/nvidia-ott/lsdc/cnee-native/models/Qwen3.5-9B"      # <-- modelo post-entrenado (cumple rol "Instruct")
+DATASET_PATH = "/home/nvidia-ott/lsdc/cnee-native/dataset/dataset_FINAL_rev_200casos_v11.json"
 BASE         = "/home/nvidia-ott/lsdc/cnee-native"
-NUM_EPOCHS   = 15 # <-- Cambiar aqui
+NUM_EPOCHS   = 15            # <-- Cambiar aqui
+MAX_SEQ_LEN  = 8192          # <-- Fijo y explicito; Qwen3.5 soporta hasta 262144 nativo
+ENABLE_THINKING = False      # <-- CNEE: salida JSON directa (criterios -> decision), sin <tool_call>
+REPETITION_PENALTY   = 1.05  # v6: keep validation eval consistent with inference
+                             # NOTA v7: no_repeat_ngram_size REVERTIDO — rompe el boilerplate
+                             # legitimo de los 7 bloques de criterios en el JSON de salida.
+
+# ── v9: stopping-criteria config for the validation eval ─────────────
+# Rationale: counting loops (timestamps incrementing second by second) emit
+# NEW tokens at every step, so neither repetition_penalty nor
+# no_repeat_ngram_size can stop them. Two custom stopping criteria handle it:
+#   (1) StopOnDecision  — 'decision' is the LAST field of the schema since v5,
+#       so the JSON is complete once it appears; stopping there is lossless.
+#   (2) TimestampLoopGuard — aborts when an abnormal density of HH:MM:SS
+#       patterns accumulates in the recent decode window (counting loop
+#       signature). Aborted cases are flagged for manual review.
+STOP_CHECK_EVERY  = 8      # run the (costly) decode check every N generated tokens
+TS_WINDOW_TOKENS  = 200    # decode only this tail window for the loop check
+TS_LOOP_THRESHOLD = 10     # >= this many HH:MM:SS in the window => counting loop
+                           # (legitimate v9 output has at most ~5 in any window)
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ══════════════════════════════════════════
 # 1. Cargar modelo
 # ══════════════════════════════════════════
-model, tokenizer = FastVisionModel.from_pretrained(
+model, tokenizer = FastModel.from_pretrained(
     model_name=MODEL_PATH,
-    load_in_4bit=False, # True for QLoRA, False for LoRA
+    max_seq_length=MAX_SEQ_LEN,
+    load_in_4bit=False,                  # True for QLoRA, False for LoRA
     use_gradient_checkpointing="unsloth",
 )
-MODEL_MAX_SEQ_LENGTH = getattr(model, "max_seq_length", 8192)
 try:
-    tokenizer.model_max_length = MODEL_MAX_SEQ_LENGTH
+    tokenizer.model_max_length = MAX_SEQ_LEN
 except Exception:
-    setattr(tokenizer, "model_max_length", MODEL_MAX_SEQ_LENGTH)
+    setattr(tokenizer, "model_max_length", MAX_SEQ_LEN)
 
-model = FastVisionModel.get_peft_model(
+model = FastModel.get_peft_model(
     model,
     finetune_vision_layers=True,
     finetune_language_layers=True,
     finetune_attention_modules=True,
     finetune_mlp_modules=True,
-    r=64, # 8 for QLoRA, 64 for LoRA in Spark or even 128 for LoRA if VRAM allows
-    lora_alpha=64, # 16 for QLoRA, 64 for LoRA in Spark or even 128 for LoRA if VRAM allows
-    lora_dropout=0.05, 
+    r=64,             # 8 for QLoRA, 64 for LoRA in Spark or even 128 for LoRA if VRAM allows
+    lora_alpha=64,    # 16 for QLoRA, 64 for LoRA in Spark or even 128 for LoRA if VRAM allows
+    lora_dropout=0.0,
     bias="none",
     random_state=42,
 )
@@ -76,7 +97,7 @@ for label, indices in grupos.items():
     n_val = max(1, int(len(indices) * 0.1))
     val_indices.extend(random.sample(indices, n_val))
 
-val_set   = set(val_indices)
+val_set       = set(val_indices)
 train_indices = [i for i in range(len(casos)) if i not in val_set]
 
 def construir_ejemplo(caso):
@@ -169,7 +190,7 @@ print(f"Eval cada:       {eval_every} steps (1 vez por epoch)\n")
 # ══════════════════════════════════════════
 # 5. Entrenamiento
 # ══════════════════════════════════════════
-FastVisionModel.for_training(model)
+FastModel.for_training(model)
 
 trainer = SFTTrainer(
     model=model,
@@ -180,29 +201,29 @@ trainer = SFTTrainer(
     callbacks=[loss_callback],
     args=SFTConfig(
         output_dir=OUTPUT_DIR,
-        per_device_train_batch_size=1,   # antes 1, ahora con gradient accumulation se simula 4
-        gradient_accumulation_steps=16,  # antes 16, ahora con batch_size 4 se acumula para simular 4
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=16,
         gradient_checkpointing=True,
         num_train_epochs=NUM_EPOCHS,
         learning_rate=1e-4,
         bf16=True,
-        logging_steps=steps_per_epoch,   # Log una vez por epoch
+        logging_steps=steps_per_epoch,
         save_strategy="epoch",
-        save_total_limit=3,              # Guardar checkpoints solo al final de cada epoch, mantener los ultimos 3  
-        eval_strategy="epoch",           # Evaluar al final de cada epoch
+        save_total_limit=3,
+        eval_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         report_to="none",
-        per_device_eval_batch_size=2, # antes 1, ahora 2 para acelerar eval sin saturar memoria
+        per_device_eval_batch_size=2,
         eval_accumulation_steps=1,
         remove_unused_columns=False,
         dataset_text_field="text",
         dataset_kwargs={"skip_prepare_dataset": True},
-        max_seq_length=MODEL_MAX_SEQ_LENGTH,
+        max_seq_length=MAX_SEQ_LEN,
         # ── DataLoader workers ──────────────────────
-        # dataloader_num_workers=4,       # Solo 1 core estaba trabajando, ahora se distribuye en 4
-        # dataloader_pin_memory=False,    # Crítico en unified memory
+        # dataloader_num_workers=4,
+        # dataloader_pin_memory=False,    # Critico en unified memory
     ),
 )
 
@@ -236,7 +257,6 @@ for i in range(n):
     overfitting = " ⚠️  Posible overfitting" if vl > tl + 0.3 else ""
     print(f"{i+1:<8} {tl:<14.4f} {vl:<14.4f}{overfitting}")
 
-# Si hay mas train logs que val logs
 for i in range(n, len(loss_callback.train_losses)):
     print(f"{i+1:<8} {loss_callback.train_losses[i]:<14.4f} {'--':<14}")
 
@@ -255,7 +275,7 @@ mejora_train = float(tl_vals[0] - tl_vals[-1])       if tl_vals else 0.0
 mejora_val   = float(vl_vals[0] - vl_vals[-1])       if vl_vals else 0.0
 
 fig, axes = plt.subplots(1, 3, figsize=(20, 5))
-fig.suptitle(f"Entrenamiento Qwen3-VL 8B — {NUM_EPOCHS} Epochs (CNEE)",
+fig.suptitle(f"Entrenamiento Qwen3.5 9B — {NUM_EPOCHS} Epochs (CNEE)",
              fontsize=13, fontweight="bold")
 
 # ── Plot 1: Train vs Val Loss por step ──
@@ -285,7 +305,7 @@ if vl_vals:
 if best_epoch:
     ax2.axvline(x=best_epoch, color="#16A34A", linestyle=":", linewidth=1.5,
                 label=f"Mejor epoch ({best_epoch})")
-    ax2.annotate(f"Val Loss\nmínimo\n{best_val:.4f}",
+    ax2.annotate(f"Val Loss\nminimo\n{best_val:.4f}",
                  xy=(best_epoch, best_val),
                  xytext=(best_epoch + 0.3, best_val + 0.05),
                  fontsize=9, color="#16A34A",
@@ -357,9 +377,49 @@ print(f"Losses guardados en: {OUTPUT_DIR}/losses.json")
 # ══════════════════════════════════════════
 print("\n=== Evaluacion del modelo en set de validacion ===")
 
-FastVisionModel.for_inference(model)
+FastModel.for_inference(model)
 
 eval_casos = [casos[i] for i in val_indices]
+
+def limpiar_thinking(texto):
+    # Qwen3.5 puede emitir un bloque <think>...</think> antes del JSON.
+    # Lo removemos para que el exact match compare solo la respuesta final.
+    return re.sub(r"<think>.*?</think>\s*", "", texto, flags=re.DOTALL).strip()
+
+# ── v10: schema validation of the `acreditacion` block ───────────────
+# The whole v10 design rests on the model REPORTING these four observables
+# reliably. If it drifts (invented values, missing block), the rule engine
+# silently stops triaging. Catch it here, in the 10-case validation eval,
+# instead of discovering it after a 200-case inference run.
+ENUMS_ACREDITACION = {
+    "causa_fisica_fotografiada": {"si", "no", "no_aplica"},
+    "prueba_no_prevenibilidad":  {"medicion_franja", "tercero_documentado",
+                                  "dano_mayor", "ninguna", "no_aplica"},
+    "canal_clima_verificado":    {"A", "B", "C", "ninguno", "no_aplica"},
+    "solicitante_identificado":  {"operador_sni", "civil", "indeterminado", "no_aplica"},
+}
+
+
+def validar_acreditacion(texto):
+    """Return (estado, detalle) where estado is 'ok' | 'invalido' | 'ausente'."""
+    m = re.search(r"\{.*\}", texto, re.DOTALL)
+    if not m:
+        return "ausente", "sin JSON parseable"
+    try:
+        parsed = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return "ausente", "JSON invalido"
+    acr = parsed.get("acreditacion")
+    if not isinstance(acr, dict):
+        return "ausente", "bloque acreditacion ausente"
+    problemas = []
+    for campo, permitidos in ENUMS_ACREDITACION.items():
+        if campo not in acr:
+            problemas.append(f"falta {campo}")
+        elif acr[campo] not in permitidos:
+            problemas.append(f"{campo}={acr[campo]!r}")
+    return ("ok", "") if not problemas else ("invalido", "; ".join(problemas))
+
 
 def extraer_decision(texto):
     match = re.search(r'"decision"\s*:\s*"(APROBADO|RECHAZADO)"', texto)
@@ -370,6 +430,59 @@ def extraer_decision(texto):
     if "RECHAZADO" in texto.upper():
         return "RECHAZADO"
     return "DESCONOCIDO"
+
+# ── v9: stopping criteria against degenerate generation ──────────────
+DECISION_RE  = re.compile(r'"decision"\s*:\s*"(?:APROBADO|RECHAZADO)"')
+# v9.1: the STOP trigger requires the closing brace, so generation never halts
+# on an unclosed JSON object (this only affects the exact-match metric of the
+# validation eval; training gradients are unaffected).
+DECISION_STOP_RE = re.compile(r'"decision"\s*:\s*"(?:APROBADO|RECHAZADO)"\s*\}')
+TIMESTAMP_RE = re.compile(r'\b\d{1,2}:\d{2}:\d{2}\b')
+
+class JsonCompleteOrLoopStop(StoppingCriteria):
+    """Single-pass stopping criterion with two triggers:
+
+    (a) json_complete — the 'decision' field appeared. Since v5 the schema
+        places 'decision' as the LAST field, so the JSON object is complete
+        and everything after it is waste. Lossless early stop.
+    (b) timestamp_loop — abnormal density of HH:MM:SS patterns in the tail
+        window. This is the signature of a counting loop (timestamps
+        incrementing one second at a time), which repetition_penalty and
+        no_repeat_ngram_size structurally CANNOT stop because every step
+        emits novel tokens. The case is flagged for manual review.
+
+    The decode check runs every STOP_CHECK_EVERY tokens and decodes only
+    the last TS_WINDOW_TOKENS tokens to keep overhead negligible.
+    """
+
+    def __init__(self, tokenizer, prompt_len):
+        self.tokenizer  = tokenizer
+        self.prompt_len = prompt_len
+        self.loop_detected = False
+        self._last_checked_len = 0
+
+    def __call__(self, input_ids, scores, **kwargs):
+        gen_len = input_ids.shape[1] - self.prompt_len
+        if gen_len - self._last_checked_len < STOP_CHECK_EVERY:
+            return False
+        self._last_checked_len = gen_len
+
+        tail_start = max(self.prompt_len, input_ids.shape[1] - TS_WINDOW_TOKENS)
+        tail = self.tokenizer.decode(
+            input_ids[0][tail_start:], skip_special_tokens=True
+        )
+
+        # (a) JSON complete: decision is the last field of the schema.
+        #     The closing brace is required — see v9.1 note above.
+        if DECISION_STOP_RE.search(tail):
+            return True
+
+        # (b) counting-loop signature
+        if len(TIMESTAMP_RE.findall(tail)) >= TS_LOOP_THRESHOLD:
+            self.loop_detected = True
+            return True
+
+        return False
 
 def inferir_caso(caso):
     imagenes = caso["images"][:MAX_IMAGENES]
@@ -389,7 +502,10 @@ def inferir_caso(caso):
     ]
 
     text_input = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=ENABLE_THINKING,   # <-- desactiva razonamiento; salida JSON directa
     )
 
     images = [Image.open(ruta).convert("RGB") for ruta in rutas]
@@ -401,22 +517,40 @@ def inferir_caso(caso):
         truncation=False,
     ).to("cuda")
 
+    prompt_len = inputs["input_ids"].shape[1]
+    stopper    = JsonCompleteOrLoopStop(tokenizer, prompt_len)
+
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=8192,    # Limite alto para asegurar que no se corte la respuesta completa
-            temperature=0.1,
-            do_sample=False,
+            max_new_tokens=8192,
+            do_sample=False,        # greedy; sin temperature (se ignoraria de todos modos)
+            repetition_penalty=REPETITION_PENALTY,        # v6: match inference harness
+            # NOTA v7: no_repeat_ngram_size REVERTIDO — rompe el boilerplate
+            # legitimo de los 7 bloques de criterios en el JSON de salida.
+            # NOTA v9: counting loops (timestamps incrementales) se cortan via
+            # StoppingCriteria, no via decoding params — ver JsonCompleteOrLoopStop.
+            stopping_criteria=StoppingCriteriaList([stopper]),
+            pad_token_id=tokenizer.eos_token_id,
         )
 
     generated = tokenizer.decode(
-        output_ids[0][inputs["input_ids"].shape[1]:],
+        output_ids[0][prompt_len:],
         skip_special_tokens=True
     )
-    return generated
+
+    # Liberar explicitamente entre casos
+    del inputs, output_ids
+    torch.cuda.empty_cache()
+    for img in images:
+        img.close()
+
+    return limpiar_thinking(generated), stopper.loop_detected
 
 exact_matches = 0
 vqa_correct   = 0
+loops_abortados = 0
+acr_ok = acr_invalido = acr_ausente = 0
 resultados    = []
 
 for i, caso in enumerate(eval_casos):
@@ -428,8 +562,15 @@ for i, caso in enumerate(eval_casos):
             ground_truth = item["text"]
 
     label_real = caso["metadata"]["label"]
-    prediccion = inferir_caso(caso)
+    prediccion, loop_abortado = inferir_caso(caso)
     label_pred = extraer_decision(prediccion)
+
+    if loop_abortado:
+        loops_abortados += 1
+        # A truncated loop has no decision field; do not let the fallback
+        # substring scan (APROBADO/RECHAZADO in observations) fake a label.
+        if not DECISION_RE.search(prediccion):
+            label_pred = "LOOP_ABORTADO"
 
     exact  = ground_truth.strip() == prediccion.strip()
     vqa_ok = label_pred == label_real
@@ -439,15 +580,26 @@ for i, caso in enumerate(eval_casos):
     if vqa_ok:
         vqa_correct += 1
 
-    print(f"    Real: {label_real} | Pred: {label_pred} | VQA: {'OK' if vqa_ok else 'FAIL'}")
+    acr_estado, acr_detalle = validar_acreditacion(prediccion)
+    if   acr_estado == "ok":       acr_ok       += 1
+    elif acr_estado == "invalido": acr_invalido += 1
+    else:                          acr_ausente  += 1
+
+    tag = " [LOOP ABORTADO — revision manual]" if loop_abortado else ""
+    print(f"    Real: {label_real} | Pred: {label_pred} | VQA: {'OK' if vqa_ok else 'FAIL'}{tag}")
+    if acr_estado != "ok":
+        print(f"    !! acreditacion {acr_estado}: {acr_detalle}")
 
     resultados.append({
-        "caso":        caso["id"],
-        "label_real":  label_real,
-        "label_pred":  label_pred,
-        "exact_match": exact,
-        "vqa_ok":      vqa_ok,
-        "prediccion":  prediccion,
+        "caso":          caso["id"],
+        "label_real":    label_real,
+        "label_pred":    label_pred,
+        "exact_match":   exact,
+        "vqa_ok":        vqa_ok,
+        "loop_abortado": loop_abortado,
+        "acreditacion_estado":  acr_estado,
+        "acreditacion_detalle": acr_detalle,
+        "prediccion":    prediccion,
     })
 
 n_val           = len(eval_casos)
@@ -468,6 +620,8 @@ print(f"METRICAS FINALES ({n_val} casos de validacion)")
 print(f"{'='*55}")
 print(f"VQA Accuracy:  {vqa_correct}/{n_val}  ({vqa_accuracy:.1f}%)")
 print(f"Exact Match:   {exact_matches}/{n_val}  ({exact_match_pct:.1f}%)")
+print(f"Loops abortados: {loops_abortados}/{n_val}")
+print(f"Acreditacion v10: ok {acr_ok}/{n_val} | invalida {acr_invalido} | ausente {acr_ausente}")
 print(f"Precision:     {precision:.3f}")
 print(f"Recall:        {recall:.3f}")
 print(f"F1-Score:      {f1:.3f}")
@@ -479,14 +633,16 @@ print(f"  FP (falso APROBADO):     {fp}")
 print(f"  FN (falso RECHAZADO):    {fn}")
 
 metricas_output = {
-    "n_val":          n_val,
-    "vqa_accuracy":   vqa_accuracy,
-    "exact_match":    exact_match_pct,
-    "precision":      precision,
-    "recall":         recall,
-    "f1":             f1,
+    "n_val":           n_val,
+    "vqa_accuracy":    vqa_accuracy,
+    "exact_match":     exact_match_pct,
+    "loops_abortados": loops_abortados,
+    "acreditacion":    {"ok": acr_ok, "invalido": acr_invalido, "ausente": acr_ausente},
+    "precision":       precision,
+    "recall":          recall,
+    "f1":              f1,
     "confusion_matrix": {"tp": tp, "tn": tn, "fp": fp, "fn": fn},
-    "resultados":     resultados,
+    "resultados":      resultados,
 }
 with open(f"{OUTPUT_DIR}/metricas_validacion.json", "w", encoding="utf-8") as f:
     json.dump(metricas_output, f, ensure_ascii=False, indent=2)
@@ -496,7 +652,7 @@ print(f"\nMetricas guardadas en: {OUTPUT_DIR}/metricas_validacion.json")
 # 10. Grafica de evaluacion
 # ══════════════════════════════════════════
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-fig.suptitle("Evaluacion del Modelo Fine-tuned — Qwen3-VL 4B (CNEE)",
+fig.suptitle("Evaluacion del Modelo Fine-tuned — Qwen3.5 9B (CNEE)",
              fontsize=13, fontweight="bold")
 
 # Plot 1: Metricas principales
