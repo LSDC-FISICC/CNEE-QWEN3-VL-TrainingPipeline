@@ -4,6 +4,34 @@ Supervised training pipeline for Vision-Language Models (VLM) with QLoRA using U
 
 ---
 
+## Qwen3 vs Qwen3.5 — Installation Differences
+
+> **Important:** Qwen3.5 is not an incremental update to Qwen3 — it is a different architecture (a unified Causal Language Model with a Vision Encoder, using hybrid Gated Delta Networks + sparse MoE instead of the plain transformer used by Qwen3/Qwen3-VL). This changes the dependency stack, so Qwen3.5 needs its **own virtual environment**: `.venv-qwen35`, kept separate from the `.venv` used for Qwen3/Qwen3-VL.
+
+| | Qwen3 / Qwen3-VL | Qwen3.5 |
+|---|---|---|
+| Virtual environment | `.venv` | `.venv-qwen35` |
+| Transformers | 4.x | Install from GitHub `main` (ms-swift requires `transformers>=5.9`) — a major-version jump |
+| Model line | Separate text (`Qwen3`) and vision (`Qwen3-VL`) checkpoints | Single unified VLM — needs `torchvision` + `pillow` even for text-only use |
+| Extra architecture deps | Not required | `flash-linear-attention>=0.4.2` and `causal-conv1d`, both installed with `--no-build-isolation` (needed for Gated Delta Networks + MoE) |
+| vLLM (if used) | — | `>=0.17.0`, requires `torch 2.10` |
+| qwen_vl_utils | — | `>=0.0.14` |
+| SGLang (if used) | — | install from `main` branch |
+| Python | 3.11 / 3.12 | 3.12 recommended (`flash-linear-attention` recommendation) |
+
+**Notes:**
+
+- On the DGX Spark (aarch64), compiling `flash-linear-attention` / `causal-conv1d` is the most common installation failure point — build with `--no-build-isolation` and expect a longer install.
+- Unsloth covers most of this automatically and supports the full Qwen3.5 family (0.8B–122B-A10B, vision + text + RL). Update it with:
+  ```bash
+  pip install --upgrade --force-reinstall --no-cache-dir unsloth unsloth_zoo
+  ```
+  For the 9B model, LoRA in BF16 uses ~22 GB — comfortable within the Spark's 130.7 GB unified memory.
+- **CUDA caution:** avoid CUDA 13.2 — Unsloth has reported incoherent outputs on that version. Stay below it or use 13.3+. This project's Spark setup (`cu128` wheel on CUDA 13.0 drivers) is outside that risk window, but check before upgrading CUDA.
+- **Do not modify the `.venv` currently used for training** — it is mid-run (`v11`). Set up `.venv-qwen35` as a fully independent environment so a `transformers` major-version bump doesn't break an in-progress training job.
+
+---
+
 ## Supported Models
 
 | Model | Parameters | VRAM at 4-bit | RTX 3070 Ti (8 GB) | Cloud / DGX Spark |
