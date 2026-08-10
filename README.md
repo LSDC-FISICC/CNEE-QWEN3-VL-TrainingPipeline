@@ -85,6 +85,8 @@ Supervised training pipeline for Vision-Language Models (VLM) with QLoRA using U
 
 ## Installation
 
+> **Which environment do you need?** This project's current base model is **Qwen3.5**. If that's what you want to install, skip straight to [Qwen3.5 (separate environment)](#qwen35-separate-environment) below — it's self-contained and doesn't depend on the Qwen3 steps. If you need **Qwen3 / Qwen3-VL** instead, follow the "Ubuntu 22.04 LTS" or "NVIDIA DGX Spark" sections immediately below.
+
 ### Ubuntu 22.04 LTS (RTX 3070 Ti / Cloud)
 
 #### 1. Verify GPU and CUDA
@@ -267,6 +269,89 @@ pip install pillow qwen-vl-utils matplotlib
 | `max_seq_length` | 8192 | 32768+ |
 | LoRA rank | 16–32 | 64–128 |
 | Models supported | 2B, 4B | 2B, 4B, 8B |
+
+---
+
+### Qwen3.5 (separate environment)
+
+Qwen3.5 needs its own virtual environment, kept fully independent from the `.venv` used for Qwen3/Qwen3-VL — see [Qwen3 vs Qwen3.5 — Installation Differences](#qwen3-vs-qwen35--installation-differences) for why. Complete step 2 (system dependencies) from the "Ubuntu 22.04 LTS" or "NVIDIA DGX Spark" section above first, then continue here.
+
+#### 1. Create the `.venv-qwen35` virtual environment
+
+```bash
+cd ~/CNEE
+python3 -m venv .venv-qwen35
+source .venv-qwen35/bin/activate
+pip install --upgrade pip setuptools wheel
+```
+
+> Python 3.12 is recommended (`flash-linear-attention` recommendation). On the DGX Spark this is already the system default; on Ubuntu 22.04, install `python3.12` first if it's not available.
+
+#### 2. Install PyTorch with CUDA 12.8
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
+
+#### 3. Install Transformers from GitHub `main`
+
+ms-swift requires `transformers>=5.9`, a major-version jump not yet on a stable PyPI release:
+
+```bash
+pip install "transformers @ git+https://github.com/huggingface/transformers.git"
+```
+
+#### 4. Install the Gated Delta Network / MoE architecture dependencies
+
+```bash
+pip install "flash-linear-attention>=0.4.2" --no-build-isolation
+pip install causal-conv1d --no-build-isolation
+```
+
+> On the DGX Spark (aarch64), this step is the most common installation failure point — expect a longer build time.
+
+#### 5. Install vision + remaining training dependencies
+
+```bash
+pip install pillow torchvision "qwen_vl_utils>=0.0.14"
+pip install accelerate peft bitsandbytes trl datasets matplotlib
+```
+
+`torchvision` and `pillow` are required even for text-only use, since Qwen3.5 is a single unified VLM checkpoint.
+
+#### 6. Install Unsloth
+
+Unsloth covers most of the above automatically and supports the full Qwen3.5 family (0.8B–122B-A10B, vision + text + RL):
+
+```bash
+pip install --upgrade --force-reinstall --no-cache-dir unsloth unsloth_zoo
+```
+
+Verify:
+
+```bash
+python3 -c "
+import torch, transformers, unsloth
+print('PyTorch:', torch.__version__)
+print('Transformers:', transformers.__version__)
+print('Unsloth:', unsloth.__version__)
+print('CUDA available:', torch.cuda.is_available())
+"
+```
+
+#### 7. (Optional) vLLM or SGLang for serving
+
+```bash
+# vLLM — requires torch 2.10
+pip install "vllm>=0.17.0"
+
+# SGLang — install from the main branch
+pip install "sglang @ git+https://github.com/sgl-project/sglang.git"
+```
+
+> **Do not modify the `.venv` currently used for training** — it may be mid-run. Keep `.venv-qwen35` fully independent so a `transformers` major-version bump doesn't break an in-progress Qwen3 job.
+>
+> **CUDA caution:** avoid CUDA 13.2 — Unsloth has reported incoherent outputs on that version. Stay below it or use 13.3+.
 
 ---
 
