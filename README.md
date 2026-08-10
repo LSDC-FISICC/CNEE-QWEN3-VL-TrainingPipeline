@@ -13,10 +13,15 @@ Supervised training pipeline for Vision-Language Models (VLM) with QLoRA using U
 | `Qwen/Qwen3-VL-8B-Instruct` | 8B | ~10–12 GB | ❌ | ✅ DGX Spark only |
 | `Qwen/Qwen3.5-2B-Instruct` | 2B | ~3.5 GB | ✅ Comfortable | ✅ |
 | `Qwen/Qwen3.5-4B-Instruct` | 4B | ~5.5 GB | ✅ Viable | ✅ |
+| `Qwen/Qwen3.5-9B` | 9B | ~18 GB (BF16) | ❌ | ✅ DGX Spark only |
 
 > **Note:** Qwen3.5 outperforms Qwen3-VL on document comprehension benchmarks (OCR, long documents). Recommended as the base model for new experiments.
 >
-> **DGX Spark:** With 130.7 GB of unified memory, the 8B model can be trained with full LoRA (BF16, no quantization required) and with complete case files — no page truncation needed.
+> **DGX Spark:** With 130.7 GB of unified memory, the 8B/9B models can be trained with full LoRA (BF16, no quantization required) and with complete case files — no page truncation needed.
+
+### Selected model — Qwen3.5-9B (no thinking)
+
+**`Qwen3.5-9B` is the current base model for this project.** Both a thinking-enabled variant (`train_with_val_loss_35_thinking.py`, `ENABLE_THINKING=True`) and a non-thinking variant (`train_with_val_loss_35.py`, `ENABLE_THINKING=False`) were trained and evaluated. The **non-thinking variant was selected** for production inference (`inference_qwen35.py`, checkpoint `output/qwen35_9b_v9/checkpoint-72`): it produces the JSON decision directly, without a `<think>...</think>` reasoning trace, which keeps inference latency and token usage predictable — thinking traces increased output length substantially without a proportional accuracy gain for this task. See [Reference Metrics](#reference-metrics) below for the comparison.
 
 ---
 
@@ -286,6 +291,9 @@ git clone https://huggingface.co/Qwen/Qwen3.5-2B-Instruct
 
 # Qwen3.5 4B
 git clone https://huggingface.co/Qwen/Qwen3.5-4B-Instruct
+
+# Qwen3.5 9B (selected base model)
+git clone https://huggingface.co/Qwen/Qwen3.5-9B
 ```
 
 ### Option B — Google Drive (direct download)
@@ -561,6 +569,34 @@ Results obtained with Qwen3-VL-4B, 25 epochs, 8 images/case, AWS g5.2xlarge (A10
 | Best checkpoint | Epoch 21 (checkpoint-126) |
 | Training time | ~4 hours |
 | Inference time | ~59 s/case (4096 tokens) |
+
+Results obtained with **Qwen3.5-9B, no thinking** (selected model), checkpoint `qwen35_9b_v9/checkpoint-72`, held-out test set (100 cases), DGX Spark:
+
+| Metric | Model only | With escalation gate (threshold 0.75) |
+|---|---|---|
+| VQA Accuracy | 77.0% | — |
+| Precision | 72.1% | 72.7% |
+| Recall | 88.0% | 88.9% |
+| F1-Score | 79.3% | 80.0% |
+| Escalation rate | — | 18.0% |
+| Avg. inference time | ~106 s/case (8192 max tokens) | — |
+
+> The escalation gate routes low-confidence predictions to manual review instead of forcing an automated decision; this raises precision/recall on the auto-decided subset at the cost of a ~18% escalation rate. Full breakdown (approved-only, rejected-only splits, train set) is in `output/inferencia_qwen35_9b_v11/resultados_inferencia.json`.
+>
+> The thinking-enabled variant (`qwen35_9b_v9_thinking`) was evaluated under the same conditions but was not selected: reasoning traces increased tokens/latency per case without a proportional accuracy improvement, so the non-thinking variant was chosen for production.
+
+Results obtained with **Qwen3.5-9B, no thinking**, checkpoint `qwen35_9b_v9/checkpoint-156` (inference run v12), same held-out test set (100 cases), DGX Spark:
+
+| Metric | Model only | With escalation gate (threshold 0.75) |
+|---|---|---|
+| VQA Accuracy | 86.0% | — |
+| Precision | 89.1% | 92.1% |
+| Recall | 83.7% | 92.1% |
+| F1-Score | 86.3% | 92.1% |
+| Escalation rate | — | 34.0% |
+| Avg. inference time | ~107 s/case (8192 max tokens) | — |
+
+> Same evaluation setup as the `checkpoint-72` run above (`output/inferencia_qwen35_9b_v12/resultados_inferencia.json`). `checkpoint-156` scores higher on every metric but escalates more cases to manual review (34% vs. 18%). By validation loss during training, the best checkpoint was actually `checkpoint-108` (`trainer_state.json`, loss 0.0385) — `72` and `156` bracket it. Production currently points at `checkpoint-72` (see `inference_qwen35.py`); this `checkpoint-156` result suggests it's worth re-checking whether `108` or `156` should be the production checkpoint instead.
 
 ---
 
